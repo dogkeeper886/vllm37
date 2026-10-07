@@ -18,39 +18,16 @@ services:
       # nothing lands in the repo tree by accident. Override with VLLM_LOG_DIR.
       - ${VLLM_LOG_DIR:-/tmp/vllm-logs}:/var/log/vllm
     environment:
-      - VLLM_USE_V1=0
-      # Phase 2 Story #35: prefer patched XFormers cutlassF on K80. The
-      # vllm/platforms/cuda.py:368 gate now picks XFormers when xformers is
-      # importable on sm < 60 (which it is — built into vllm37-local image
-      # by docker/k80/runtime/Dockerfile.local). Falls back to TORCH_SDPA
-      # automatically if xformers isn't importable.
-      - VLLM_ATTENTION_BACKEND=XFORMERS
+      # Engine settings live in runtime/Dockerfile.local; only per-run
+      # diagnostics are set here.
       - NCCL_DEBUG=INFO
       # NCCL writes to this file per host and per PID (%h / %p are NCCL
       # substitutions). Keeps NCCL output separate from vLLM's stdout so a
       # container hang does not lose NCCL evidence with the app logs.
       - NCCL_DEBUG_FILE=/var/log/vllm/nccl-%h-%p.log
-      - NCCL_P2P_DISABLE=1
-      - TORCHDYNAMO_DISABLE=1
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      # Crash-safe stdio: Python line-flushes every record so a hang does not
-      # leave the final log lines stuck in a 4 KB pipe buffer.
-      - PYTHONUNBUFFERED=1
       # Opt-in TP-init trace logging. Off by default; CI/dev sets =1 when
       # diagnosing a hang.
       - VLLM_K80_TRACE=${VLLM_K80_TRACE:-0}
-    # Override the image entrypoint to line-buffer libc stdio (PYTHONUNBUFFERED
-    # only covers Python's own stdio; NCCL writes to C stderr directly).
-    # KEEP IN SYNC with the ENTRYPOINT in runtime/Dockerfile and
-    # runtime/Dockerfile.local — if that changes, mirror the change here. The
-    # compose override replaces ENTRYPOINT wholesale (CMD below is preserved).
-    entrypoint:
-      - "stdbuf"
-      - "-oL"
-      - "-eL"
-      - "python"
-      - "-m"
-      - "vllm.entrypoints.openai.api_server"
     command:
       - "--model"
       - "${MODEL:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}"

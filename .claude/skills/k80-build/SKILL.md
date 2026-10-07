@@ -11,7 +11,7 @@ GCC 10 + PyTorch 2.0.1 + sm_37 combination is pinned inside the builder image.
 
 ## When to use
 - Producing a runtime image to test code changes
-- Rebuilding after touching `csrc/`, `setup.py`, or `requirements/cuda_k80.txt`
+- Rebuilding after touching `csrc/`, `setup.py`, `docker/k80/requirements.txt` or `docker/k80/constraints.txt`
 - Building on a clean machine (pull `dogkeeper886/vllm37-builder` first)
 
 ## Environment
@@ -22,7 +22,6 @@ GCC 10 + PyTorch 2.0.1 + sm_37 combination is pinned inside the builder image.
 ## Build types
 - **builder** — `make build-builder` (CUDA + GCC + PyTorch 2.0.1 base, ~120 min first time)
 - **local** — `make build-local` (compile current checkout against the builder, ~10 min)
-- **github** — `make build-runtime` (clone `$VLLM_REPO@$VLLM_BRANCH` in-container)
 
 ## Commands
 ```bash
@@ -46,7 +45,6 @@ make build-local JOBS=8   # override parallelism via .env
 ## Outputs
 - `vllm37-builder:latest` — base image with toolchain
 - `vllm37-local:latest` — runtime image (from local source)
-- `vllm37:latest` — runtime image (from GitHub)
 
 ## Related
 - `/ci` — trigger the build remotely on the self-hosted runner

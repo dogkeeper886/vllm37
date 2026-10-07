@@ -3,28 +3,23 @@
 #
 # Usage:
 #   make build-builder    # Build the builder image (~120 min first time)
-#   make build-runtime    # Build runtime from GitHub clone
-#   make build-local      # Build runtime from local source
-#   make build            # Build builder + runtime (GitHub)
-#   make build-all-local  # Build builder + runtime (local)
+#   make build-local      # Build the runtime image from this checkout
+#   make build-all-local  # Build builder + runtime
 #   make run              # Run with docker compose
 #   make clean            # Remove images
 
 -include .env
 
 BUILDER_IMAGE  ?= vllm37-builder
-RUNTIME_IMAGE  ?= vllm37
 RUNTIME_LOCAL  ?= vllm37-local
 JOBS           ?= 4
-VLLM_REPO      ?= https://github.com/dogkeeper886/vllm37.git
-VLLM_BRANCH    ?= main
 # Host dir bind-mounted into the container at /var/log/vllm for vllm + NCCL
 # logs. Must exist and be writable before `docker compose up` — otherwise
 # Docker auto-creates it as root-owned and NCCL_DEBUG_FILE silently fails.
 VLLM_LOG_DIR   ?= /tmp/vllm-logs
 REPO_ROOT      := $(shell git rev-parse --show-toplevel 2>/dev/null || echo ../..)
 
-.PHONY: help build-builder build-runtime build-local build-local-no-cache build build-all-local log-dir run stop logs clean verify-cutlass-patches verify-xformers-patches
+.PHONY: help build-builder build-local build-local-no-cache build-all-local log-dir run stop logs clean verify-cutlass-patches verify-xformers-patches
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -35,17 +30,7 @@ build-builder: ## Build the builder image (CUDA 11.4 + GCC 10 + Python 3.10 + Py
 		-t $(BUILDER_IMAGE) \
 		-f builder/Dockerfile \
 		--build-arg JOBS=$(JOBS) \
-		.
-
-build-runtime: ## Build runtime image from GitHub clone
-	docker build \
-		-t $(RUNTIME_IMAGE) \
-		-f runtime/Dockerfile \
-		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
-		--build-arg VLLM_REPO=$(VLLM_REPO) \
-		--build-arg VLLM_BRANCH=$(VLLM_BRANCH) \
-		--build-arg MAX_JOBS=$(JOBS) \
-		.
+		$(REPO_ROOT)
 
 GIT_SHA := $(shell git -C $(REPO_ROOT) rev-parse HEAD 2>/dev/null || echo unknown)
 
@@ -67,8 +52,6 @@ build-local-no-cache: ## Build runtime image from local source (no layer cache)
 		--build-arg GIT_SHA=$(GIT_SHA) \
 		$(REPO_ROOT)
 
-build: build-builder build-runtime ## Build builder + runtime (GitHub clone)
-
 build-all-local: build-builder build-local ## Build builder + runtime (local source)
 
 log-dir: ## Ensure VLLM_LOG_DIR exists (bind-mount target for vllm + NCCL logs)
@@ -85,7 +68,7 @@ logs: ## Show vLLM server logs
 	docker compose logs -f
 
 clean: ## Remove builder and runtime images
-	-docker rmi $(RUNTIME_IMAGE) $(RUNTIME_LOCAL) $(BUILDER_IMAGE) 2>/dev/null
+	-docker rmi $(RUNTIME_LOCAL) $(BUILDER_IMAGE) 2>/dev/null
 	@echo "Cleaned up images."
 
 # CUTLASS revision pinned by CMakeLists.txt:302 — keep these in sync if upstream
@@ -114,7 +97,8 @@ verify-cutlass-patches: ## Verify cutlass-patches/*.patch apply cleanly to the p
 # XFormers pin — v0.0.23 (Dec 2023). Two simultaneous constraints force this:
 #   1. v0.0.29+ removed the cutlass mem-eff backend (commit 3d947a6)
 #   2. v0.0.24+ requires torch>=2.1; v0.0.28+ requires torch>=2.4. Our K80
-#      fork uses PyTorch 2.0.1 (CLAUDE.md), so we cap at v0.0.23 (torch>=1.12).
+#      fork uses PyTorch 2.0.1 (docker/k80/constraints.txt), so we cap at
+#      v0.0.23 (torch>=1.12).
 # v0.0.23 is the latest tag that satisfies BOTH constraints. See
 # xformers-patches/README.md for the full rationale.
 XFORMERS_PIN_TAG ?= v0.0.23

@@ -1,0 +1,5 @@
+# Pins for every pip install of vllm37 on Tesla K80 (pip install -c).
+# Shared by the builder and runtime images and the host build.
+torch==2.0.1                    # sm_37 wheel built by tools/k80-host/setup.sh toolchain
+numpy<2                         # PyTorch 2.0.1 is compiled against numpy 1.x
+opencv-python-headless<4.12     # 4.12+ requires numpy>=2
