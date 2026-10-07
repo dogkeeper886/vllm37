@@ -84,8 +84,15 @@ def is_url_available(url: str) -> bool:
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+    def __init__(self,
+                 name: str,
+                 cmake_lists_dir: str = '.',
+                 py_limited_api: bool = True,
+                 **kwa) -> None:
+        super().__init__(name,
+                         sources=[],
+                         py_limited_api=py_limited_api,
+                         **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -610,8 +617,14 @@ def get_requirements() -> list[str]:
 
 ext_modules = []
 
+# The legacy CUDA build (e.g. Tesla K80) turns USE_SABI off in CMakeLists.txt,
+# so _C and _moe_C are built with the CPython suffix instead of .abi3.so.
+_legacy_cuda_build = os.environ.get("VLLM_BUILD_LEGACY_CUDA", "0") == "1"
+
 if _is_cuda() or _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(
+        CMakeExtension(name="vllm._moe_C",
+                       py_limited_api=not _legacy_cuda_build))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -633,7 +646,8 @@ if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+    ext_modules.append(
+        CMakeExtension(name="vllm._C", py_limited_api=not _legacy_cuda_build))
 
 package_data = {
     "vllm": [
