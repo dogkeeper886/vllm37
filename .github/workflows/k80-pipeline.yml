@@ -16,7 +16,18 @@ on:
       model:
         description: "Model for smoke test"
         required: false
-        default: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        default: "Qwen/Qwen3-0.6B"
+        type: string
+      attention_backend:
+        description: "Attention backend (TORCH_SDPA for a regression comparison)"
+        required: false
+        default: "XFORMERS"
+        type: choice
+        options: [XFORMERS, TORCH_SDPA]
+      builder_image:
+        description: "Builder image to build on"
+        required: false
+        default: "vllm37-builder:latest"
         type: string
 
 jobs:
@@ -25,6 +36,7 @@ jobs:
     uses: ./.github/workflows/k80-build.yml
     with:
       no_cache: ${{ inputs.no_cache }}
+      builder_image: ${{ inputs.builder_image }}
 
   runtime:
     name: Runtime smoke
@@ -33,3 +45,5 @@ jobs:
     with:
       tp_size: ${{ inputs.tp_size }}
       model: ${{ inputs.model }}
+      attention_backend: ${{ inputs.attention_backend }}
+      builder_image: ${{ inputs.builder_image }}

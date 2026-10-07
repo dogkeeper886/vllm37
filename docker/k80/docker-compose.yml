@@ -28,6 +28,8 @@ services:
       # Opt-in TP-init trace logging. Off by default; CI/dev sets =1 when
       # diagnosing a hang.
       - VLLM_K80_TRACE=${VLLM_K80_TRACE:-0}
+      # XFORMERS (default) or TORCH_SDPA, e.g. for a regression comparison.
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
     command:
       - "--model"
       - "${MODEL:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}"

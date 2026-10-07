@@ -11,12 +11,23 @@ on:
       model:
         description: "Model to serve"
         required: false
-        default: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        default: "Qwen/Qwen3-0.6B"
         type: string
+      attention_backend:
+        description: "Attention backend (TORCH_SDPA for a regression comparison)"
+        required: false
+        default: "XFORMERS"
+        type: choice
+        options: [XFORMERS, TORCH_SDPA]
       k80_trace:
         description: "Enable VLLM_K80_TRACE=1 for TP-init hang diagnosis logs"
         required: false
         default: "1"
+        type: string
+      builder_image:
+        description: "Builder image, used only if the runtime image must be rebuilt"
+        required: false
+        default: "vllm37-builder:latest"
         type: string
   workflow_call:
     inputs:
@@ -26,11 +37,19 @@ on:
         type: string
       model:
         required: false
-        default: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        default: "Qwen/Qwen3-0.6B"
+        type: string
+      attention_backend:
+        required: false
+        default: "XFORMERS"
         type: string
       k80_trace:
         required: false
         default: "1"
+        type: string
+      builder_image:
+        required: false
+        default: "vllm37-builder:latest"
         type: string
     outputs:
       result:
@@ -45,11 +64,17 @@ jobs:
   runtime:
     name: Container smoke test
     runs-on: [self-hosted, vllm]
+    # Covers a runtime image rebuild (~15 min), model download, 10 min boot
+    # wait and the smoke request; a hang releases the k80-hardware lock.
+    timeout-minutes: 45
     env:
       TP_SIZE: ${{ inputs.tp_size || '1' }}
-      MODEL: ${{ inputs.model || 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' }}
+      MODEL: ${{ inputs.model || 'Qwen/Qwen3-0.6B' }}
+      VLLM_ATTENTION_BACKEND: ${{ inputs.attention_backend || 'XFORMERS' }}
       VLLM_K80_TRACE: ${{ inputs.k80_trace || '1' }}
+      BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
       VLLM_LOG_DIR: /tmp/k80-ci-logs
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
     outputs:
       result: ${{ steps.smoke.outcome }}
 
@@ -59,30 +84,17 @@ jobs:
 
       - name: Ensure runtime image matches branch SHA
         working-directory: docker/k80
-        env:
-          BRANCH_SHA: ${{ github.sha }}
+        run: ci/ensure-runtime.sh "$BUILDER_IMAGE"
+
+      - name: XFormers cutlassF kernel test (GPU0)
         run: |
-          # k80-runtime.yml used to only verify the image existed, which meant
-          # a stale image silently masked source-level changes (see #10). Now
-          # the build step stamps org.opencontainers.image.revision with the
-          # source SHA; if it differs from the checked-out branch SHA, we
-          # rebuild from local source before running the smoke.
-          IMAGE_SHA=$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-            vllm37-local:latest 2>/dev/null || echo "")
-          if [ "$IMAGE_SHA" = "$BRANCH_SHA" ]; then
-            echo "vllm37-local:latest already at branch SHA ($BRANCH_SHA); reusing image."
-            exit 0
-          fi
-          if [ -z "$IMAGE_SHA" ]; then
-            echo "Runtime image missing or has no revision label; building from current source."
-          else
-            echo "Runtime image is at $IMAGE_SHA but branch is $BRANCH_SHA; rebuilding."
-          fi
-          if ! docker image inspect vllm37-builder:latest >/dev/null 2>&1; then
-            echo "::error::vllm37-builder:latest not found. Run k80-build.yml with rebuild_builder=true, or docker pull dogkeeper886/vllm37-builder."
-            exit 1
-          fi
-          make build-local
+          # Runs the patched kernels against an eager reference inside the
+          # image that serves, before the server takes the GPU.
+          docker run --rm --runtime=nvidia --gpus device=0 \
+            -v "${{ github.workspace }}/docker/k80/xformers-build:/t:ro" \
+            --entrypoint bash vllm37-local:latest \
+            -c 'cd /tmp && timeout 120 python /t/test_cutlass_fp32.py' | tee /tmp/xformers-kernel.log
+          grep -qE "^RESULT.*PASS\b" /tmp/xformers-kernel.log
 
       - name: Prepare log directory
         run: |
@@ -96,33 +108,33 @@ jobs:
       - name: Start vLLM container
         working-directory: docker/k80
         run: |
-          echo "Starting vLLM: TP_SIZE=$TP_SIZE MODEL=$MODEL VLLM_K80_TRACE=$VLLM_K80_TRACE"
-          TP_SIZE=$TP_SIZE MODEL=$MODEL \
-          VLLM_K80_TRACE=$VLLM_K80_TRACE VLLM_LOG_DIR=$VLLM_LOG_DIR \
-            docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
-          docker compose ps
+          echo "Starting vLLM: TP_SIZE=$TP_SIZE MODEL=$MODEL VLLM_ATTENTION_BACKEND=$VLLM_ATTENTION_BACKEND VLLM_K80_TRACE=$VLLM_K80_TRACE"
+          $COMPOSE up -d
+          $COMPOSE ps
 
       - name: Wait for server ready
-        id: wait
         working-directory: docker/k80
         run: |
-          echo "Waiting up to 10 min for http://localhost:8000/v1/models ..."
-          for i in $(seq 1 120); do
-            CID=$(docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -q vllm)
-            STATE=$(docker inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "missing")
-            if [ "$STATE" != "running" ]; then
-              echo "::error::Container state=$STATE before server became ready."
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color --tail 200
-              exit 1
-            fi
-            if curl -fsS --max-time 3 http://localhost:8000/v1/models >/dev/null 2>&1; then
-              echo "Server ready after ${i}x 5s polls."
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::Server did not become ready in 10 minutes."
-          exit 1
+          if ! ci/wait-ready.sh 600; then
+            echo "::error::Server did not become ready."
+            $COMPOSE logs --no-color --tail 200
+            exit 1
+          fi
+
+      - name: Assert attention backend
+        working-directory: docker/k80
+        run: |
+          case "$VLLM_ATTENTION_BACKEND" in
+            XFORMERS)   EXPECT="Using XFormers attention backend" ;;
+            TORCH_SDPA) EXPECT="Using Torch SDPA attention backend" ;;
+            *) echo "::error::Unknown attention backend $VLLM_ATTENTION_BACKEND"; exit 1 ;;
+          esac
+          LINE=$($COMPOSE logs --no-color | grep -m1 "attention backend" || true)
+          echo "Selected: ${LINE:-<no backend line>}"
+          if ! grep -qF "$EXPECT" <<<"$LINE"; then
+            echo "::error::Expected '$EXPECT'."
+            exit 1
+          fi
 
       - name: Smoke test — /v1/completions
         id: smoke
@@ -177,15 +189,15 @@ jobs:
         if: always()
         working-directory: docker/k80
         run: |
-          mkdir -p /tmp/k80-ci-logs
-          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs \
-            --no-color > /tmp/k80-ci-logs/vllm.log 2>&1 || true
-          tail -200 /tmp/k80-ci-logs/vllm.log || true
+          mkdir -p "$VLLM_LOG_DIR"
+          $COMPOSE logs --no-color > "$VLLM_LOG_DIR/vllm.log" 2>&1 || true
+          cp /tmp/xformers-kernel.log "$VLLM_LOG_DIR/" 2>/dev/null || true
+          tail -200 "$VLLM_LOG_DIR/vllm.log" || true
 
       - name: Tear down container
         if: always()
         working-directory: docker/k80
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v || true
+        run: $COMPOSE down -v || true
 
       - name: Upload logs
         if: always()

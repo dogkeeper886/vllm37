@@ -4,9 +4,9 @@ name: K80 CUTLASS sm_37 Reproducer
 # inside the K80 builder image, run the resulting binary on a single K80 die,
 # and capture the output as a CI artifact.
 #
-# Single-die TP=1-equivalent compute. No NCCL, no multi-die. Falls under
-# the "always fine" category in the hardware-risky-ops timing rule —
-# compute is bounded to ~1 MB VRAM, no power-cap experiments.
+# Single-die TP=1-equivalent compute. No NCCL, no multi-die; compute is
+# bounded to ~1 MB VRAM. Kept as a manual check of the CUTLASS Sm37 patch
+# that the xformers build depends on.
 
 on:
   workflow_dispatch:
@@ -19,6 +19,8 @@ jobs:
   repro:
     name: Compile + run sgemm_sm37
     runs-on: [self-hosted, vllm]
+    # Compile (~5 min) plus two runs capped at 60 s and 120 s.
+    timeout-minutes: 20
     env:
       ARTIFACT_DIR: /tmp/k80-cutlass-repro-logs
 
@@ -26,14 +28,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Verify builder image is present
-        run: |
-          if ! docker image inspect vllm37-builder:latest >/dev/null 2>&1; then
-            echo "::error::vllm37-builder:latest not found. Run k80-build.yml first, or pull dogkeeper886/vllm37-builder."
-            exit 1
-          fi
-          docker image inspect vllm37-builder:latest \
-            --format 'builder: {{.RepoTags}} size {{.Size}} bytes'
+      - name: Ensure builder image exists
+        run: docker/k80/ci/ensure-builder.sh vllm37-builder:latest
 
       - name: Prepare artifact directory
         run: |
