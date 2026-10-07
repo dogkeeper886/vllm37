@@ -196,4 +196,3 @@ If our K80 fork ever upgrades PyTorch past 2.4 (and somehow keeps K80 support �
 - [`docs/port/flash-attn-mma.md`](../../../docs/port/flash-attn-mma.md) — Story 0.2's analysis (XFormers reference at §3.3).
 - [`docs/port/cuda-11.4-version-pins.md`](../../../docs/port/cuda-11.4-version-pins.md) — Story 0.3's pin reasoning, including XFormers HEAD details (now superseded by the v0.0.23 finding above).
 - [`docker/k80/cutlass-patches/`](../cutlass-patches/) — sister directory for CUTLASS patches; Phase 1 verified.
-- [`requirements/cuda_k80.txt`](../../../requirements/cuda_k80.txt) — references this directory and the pin.

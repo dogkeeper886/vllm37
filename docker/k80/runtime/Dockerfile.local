@@ -1,12 +1,12 @@
-# vLLM K80 Runtime Image (Local source)
-# Copies local vLLM source and builds against the builder image.
-# Use this during development to avoid re-cloning from GitHub.
+# vLLM K80 Runtime Image (local source)
+# Builds this checkout on top of the builder image with the deps, xformers and
+# vllm stages of tools/k80-host/setup.sh. Layers go from least to most often
+# changed, so a source edit rebuilds only the last stage.
 #
 # Requires: vllm37-builder image (built from docker/k80/builder/Dockerfile)
 #
-# Build (from repo root):
-#   docker build -t vllm37-local \
-#     -f docker/k80/runtime/Dockerfile.local .
+# Build (from repo root; `make build-local` does this):
+#   docker build -t vllm37-local -f docker/k80/runtime/Dockerfile.local .
 
 ARG BUILDER_IMAGE=vllm37-builder
 FROM ${BUILDER_IMAGE}
@@ -17,75 +17,55 @@ ARG MAX_JOBS=4
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 
-# ============================================================================
-# Copy local source
-# ============================================================================
-COPY . /usr/local/src/vllm37
-
 WORKDIR /usr/local/src/vllm37
 
-# Install build system requirements
-RUN pip install --no-cache-dir "setuptools>=77.0.3,<80.0.0" "setuptools-scm>=8.0"
+# 1. Python dependencies
+COPY requirements/common.txt requirements/common.txt
+COPY docker/k80/requirements.txt docker/k80/constraints.txt docker/k80/
+COPY tools/k80-host tools/k80-host
+RUN JOBS=${MAX_JOBS} tools/k80-host/setup.sh deps
 
-# Install Python dependencies (use K80-specific requirements)
-RUN pip install --no-cache-dir -r requirements/cuda_k80.txt 2>/dev/null || \
-    pip install --no-cache-dir -r requirements/common.txt
+# 2. Patched xformers (CPU-only compile, ~8 min)
+COPY docker/k80/xformers-build docker/k80/xformers-build
+COPY docker/k80/xformers-patches docker/k80/xformers-patches
+COPY docker/k80/cutlass-patches docker/k80/cutlass-patches
+RUN JOBS=${MAX_JOBS} tools/k80-host/setup.sh xformers && \
+    rm -rf ${K80_PREFIX}/src/xformers-build
 
-# Build and install vLLM with legacy CUDA flags
-# --no-deps prevents pip from pulling torch 2.7.1 which would overwrite
-# our custom PyTorch 2.0.1 built with CUDA 11.4 + sm_37 support.
-RUN CUDA_HOME=/usr/local/cuda-11.4 \
-    TORCH_CUDA_ARCH_LIST="3.7" \
-    VLLM_BUILD_LEGACY_CUDA=1 \
-    CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    MAX_JOBS=${MAX_JOBS} \
-    pip install . --no-build-isolation --no-deps
+# 3. vLLM from this checkout
+COPY . .
+RUN K80_EDITABLE=0 JOBS=${MAX_JOBS} tools/k80-host/setup.sh vllm
 
-# Downgrade numpy to 1.x (PyTorch 2.0.1 was compiled against numpy 1.x)
-RUN pip install --no-cache-dir "numpy<2"
-
-# ============================================================================
-# Build patched XFormers for K80 attention (Phase 2 Story #35)
-# ============================================================================
-# CPU-only build (~8 minutes on K80 builder image's CPUs). Clones XFormers
-# v0.0.23 with submodules, applies our xformers + CUTLASS sm_37 patches,
-# regenerates the autogen kernels (Step 2c per PR #65), compiles for
-# sm_37 only, installs system-wide. Verifies import + cc-gate post-install.
-#
-# The build script + patches are already in the image via the COPY above.
-RUN PATCH_DIR=/usr/local/src/vllm37/docker/k80/xformers-patches \
-    CUTLASS_PATCH_DIR=/usr/local/src/vllm37/docker/k80/cutlass-patches \
-    WORK_DIR=/tmp/xformers-build-work \
-    bash /usr/local/src/vllm37/docker/k80/xformers-build/build.sh \
- && rm -rf /tmp/xformers-build-work
-
-# Switch WORKDIR away from source tree so Python doesn't shadow the
-# installed package (site-packages) with the source directory.
+# Leave the source tree so Python imports the installed package, not ./vllm.
 WORKDIR /workspace
 
 # ============================================================================
-# Runtime configuration
+# Runtime configuration (docker-compose.yml adds only per-run settings)
 # ============================================================================
 # NVIDIA Container Toolkit requires these to expose GPUs inside the container
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-ENV VLLM_USE_V1=0
-ENV CUDA_HOME=/usr/local/cuda-11.4
-ENV VLLM_ATTENTION_BACKEND=XFORMERS
-# PyTorch 2.0 dynamo has broken SymInt handling — disable entirely
-ENV TORCHDYNAMO_DISABLE=1
-# K80 is PCIe-only (no NVLink) — P2P causes kernel timeouts with TP>1
-ENV NCCL_P2P_DISABLE=1
-# Safer multiprocessing for PyTorch 2.0 distributed
-ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    VLLM_USE_V1=0 \
+    VLLM_ATTENTION_BACKEND=XFORMERS \
+    TORCHDYNAMO_DISABLE=1 \
+    NCCL_P2P_DISABLE=1 \
+    VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    PYTHONUNBUFFERED=1
+# VLLM_ATTENTION_BACKEND: the patched xformers cutlassF kernels run on sm_37.
+# TORCHDYNAMO_DISABLE: PyTorch 2.0 dynamo has broken SymInt handling.
+# NCCL_P2P_DISABLE: K80 is PCIe-only; P2P causes kernel timeouts with TP>1.
+# VLLM_WORKER_MULTIPROC_METHOD: spawn is safer for PyTorch 2.0 distributed.
 
 EXPOSE 8000
 
-ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+# stdbuf line-buffers libc stdio so NCCL output is not lost when a run hangs.
+ENTRYPOINT ["stdbuf", "-oL", "-eL", "python", "-m", "vllm.entrypoints.openai.api_server"]
+# TP=1 by default: TP=4 across both K80 boards can overload the shared CPU
+# power cable. Raise it per run (docker-compose.yml reads TP_SIZE).
 CMD ["--model", "TinyLlama/TinyLlama-1.1B-Chat-v1.0", \
      "--dtype", "float32", \
      "--enforce-eager", \
-     "--tensor-parallel-size", "4", \
+     "--tensor-parallel-size", "1", \
      "--max-model-len", "2048", \
      "--gpu-memory-utilization", "0.85", \
      "--swap-space", "0"]

@@ -166,4 +166,3 @@ git -C /tmp/cutlass grep -n "is_same<ArchTag, arch::Sm80>" include/cutlass/gemm/
 - [`docs/port/cutlass-arch-system.md`](../../../docs/port/cutlass-arch-system.md) — Story 0.1's CUTLASS dispatch analysis (the why behind these patches).
 - [`docs/port/kepler-vs-maxwell.md`](../../../docs/port/kepler-vs-maxwell.md) — Story 0.4's hardware feature gap analysis.
 - [`docs/port/cuda-11.4-version-pins.md`](../../../docs/port/cuda-11.4-version-pins.md) — Story 0.3's version pin survey.
-- [`requirements/cuda_k80.txt`](../../../requirements/cuda_k80.txt) — references this directory and the pin in `CMakeLists.txt:302`.

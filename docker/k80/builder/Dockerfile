@@ -1,20 +1,18 @@
 # vLLM K80 Builder Image
-# Base image with CUDA 11.4, GCC 10, CMake 4, Python 3.10, and PyTorch 2.0.1
-# Follows the dogkeeper886/ollama37 two-stage build pattern on Rocky Linux 8.
+# Rocky Linux 8 with CUDA 11.4, GCC 10.5 and CMake 4, plus the toolchain stage
+# of tools/k80-host/setup.sh: Python 3.10.16, a virtualenv at /opt/venv,
+# cuDNN 8.7 for CUDA 11 and a PyTorch v2.0.1 sm_37 wheel. The host build runs
+# the same script, so both get the same stack.
 #
-# Build:
+# Build (from the repo root; the Makefile does this):
 #   docker build -t vllm37-builder -f docker/k80/builder/Dockerfile .
 #
-# Expected build time: ~120+ minutes first time (GCC ~60m, Python ~15m, PyTorch ~30m)
+# Expected build time: ~120 min (GCC ~60 min, Python ~15 min, PyTorch ~45 min)
 
 FROM rockylinux/rockylinux:8
 
-ARG CUDA_VERSION=11.4.4
 ARG GCC_VERSION=10.5.0
 ARG CMAKE_VERSION=4.0.1
-ARG PYTHON_VERSION=3.10.16
-ARG PYTORCH_VERSION=v2.0.1
-ARG NUMPY_VERSION=1.26.4
 ARG JOBS=4
 
 # ============================================================================
@@ -50,13 +48,13 @@ RUN dnf -y install \
     && dnf clean all
 
 # ============================================================================
-# CUDA 11.4 Toolkit
+# CUDA 11.4 Toolkit (cuDNN comes from the toolchain stage below: the repo's
+# libcudnn8 resolves to a CUDA 12 build that driver 470 cannot run)
 # ============================================================================
 RUN dnf config-manager --add-repo \
         https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \
     dnf -y install \
         cuda-toolkit-11-4 \
-        libcudnn8-devel \
     && dnf clean all
 
 ENV CUDA_HOME=/usr/local/cuda-11.4
@@ -101,74 +99,18 @@ RUN cd /tmp && \
     cd /tmp && rm -rf cmake-${CMAKE_VERSION}*
 
 # ============================================================================
-# Python 3.10 from source (Rocky 8 only has 3.8)
+# Toolchain stage: Python 3.10.16, venv, cuDNN 8.7, PyTorch v2.0.1 (sm_37)
 # ============================================================================
-RUN cd /tmp && \
-    wget -q https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz && \
-    tar xf Python-${PYTHON_VERSION}.tgz && \
-    cd Python-${PYTHON_VERSION} && \
-    ./configure \
-        --prefix=/usr/local \
-        --enable-shared \
-        --enable-optimizations \
-        --with-lto \
-        LDFLAGS="-Wl,-rpath=/usr/local/lib" && \
-    make -j${JOBS} && \
-    make install && \
-    cd /tmp && rm -rf Python-${PYTHON_VERSION}*
+ENV K80_PREFIX=/opt/k80 \
+    K80_VENV=/opt/venv
+COPY tools/k80-host /usr/local/src/vllm37/tools/k80-host
+COPY docker/k80/constraints.txt /usr/local/src/vllm37/docker/k80/constraints.txt
+RUN JOBS=${JOBS} /usr/local/src/vllm37/tools/k80-host/setup.sh toolchain && \
+    rm -rf ${K80_PREFIX}/src
 
-RUN ln -sf /usr/local/bin/python3.10 /usr/local/bin/python3 && \
-    ln -sf /usr/local/bin/python3 /usr/local/bin/python && \
-    ln -sf /usr/local/bin/pip3.10 /usr/local/bin/pip3 && \
-    ln -sf /usr/local/bin/pip3 /usr/local/bin/pip
+ENV PATH=${K80_VENV}/bin:${PATH} \
+    LD_LIBRARY_PATH=${K80_PREFIX}/cudnn/lib:${LD_LIBRARY_PATH} \
+    CUDNN_INCLUDE_DIR=${K80_PREFIX}/cudnn/include \
+    CUDNN_LIBRARY=${K80_PREFIX}/cudnn/lib
 
-# ============================================================================
-# Python build dependencies
-# ============================================================================
-RUN pip install --no-cache-dir \
-    "numpy==${NUMPY_VERSION}" \
-    packaging \
-    setuptools \
-    wheel \
-    ninja \
-    pyyaml \
-    typing_extensions \
-    cffi \
-    future \
-    six \
-    requests \
-    dataclasses \
-    filelock \
-    jinja2 \
-    networkx \
-    sympy
-
-# ============================================================================
-# PyTorch 2.0.1 from source (with CUDA 11.4 + sm_37)
-# ============================================================================
-RUN cd /usr/local/src && \
-    git clone --depth 1 --branch ${PYTORCH_VERSION} --recursive \
-        https://github.com/pytorch/pytorch.git && \
-    cd pytorch && \
-    pip install --no-cache-dir -r requirements.txt && \
-    CUDA_HOME=${CUDA_HOME} \
-    TORCH_CUDA_ARCH_LIST="3.7" \
-    CMAKE_PREFIX_PATH=/usr/local \
-    CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    USE_CUDA=1 \
-    USE_CUDNN=1 \
-    USE_NCCL=1 \
-    USE_DISTRIBUTED=1 \
-    USE_MKLDNN=0 \
-    BUILD_TEST=0 \
-    MAX_JOBS=${JOBS} \
-    python setup.py install && \
-    cd /usr/local/src && rm -rf pytorch
-
-# Verify PyTorch installation
-RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
-
-# ============================================================================
-# Final state: builder image ready for vLLM compilation
-# ============================================================================
 WORKDIR /usr/local/src

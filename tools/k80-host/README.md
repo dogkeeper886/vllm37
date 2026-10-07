@@ -6,7 +6,7 @@ Builds and serves vllm37 on the host filesystem, for fast iteration on a machine
 |---|---|---|
 | Use for | Editing and testing on the K80 machine | CI, clean and portable builds |
 | Python edits | Live (editable install) | Rebuild the image |
-| PyTorch | 2.0.1 wheel built by `setup.sh` (cuDNN 8.7 for CUDA 11) | Builder image |
+| Build steps | `setup.sh` | `setup.sh` stages, run in the builder and runtime images |
 
 ## Requirements
 
@@ -16,10 +16,11 @@ Builds and serves vllm37 on the host filesystem, for fast iteration on a machine
 ## Build
 
 ```bash
-tools/k80-host/setup.sh          # first run about 1.5-2 h (PyTorch); later runs rebuild only vLLM
+tools/k80-host/setup.sh          # all stages; first run about 1.5-2 h (PyTorch)
+tools/k80-host/setup.sh vllm     # after a source change: rebuild only vLLM
 ```
 
-Puts Python 3.10.16, cuDNN, sources and wheels in `~/opt/k80` (`K80_PREFIX`) and the virtualenv in `~/.venvs/vllm37` (`K80_VENV`). Every pip install uses `constraints.txt`.
+Stages: `toolchain` (Python 3.10.16, venv, cuDNN 8.7, PyTorch 2.0.1), `deps`, `xformers`, `vllm`. The Docker builder runs `toolchain`; the runtime image runs the other three. Puts Python, cuDNN, sources and wheels in `~/opt/k80` (`K80_PREFIX`) and the virtualenv in `~/.venvs/vllm37` (`K80_VENV`). Every pip install uses `docker/k80/constraints.txt`.
 
 ## Serve
 

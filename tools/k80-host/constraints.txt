@@ -1,4 +1,0 @@
-# Pins for every pip install into the K80 host venv (pip install -c).
-torch==2.0.1                    # the sm_37 wheel built by setup.sh
-numpy<2                         # PyTorch 2.0.1 is compiled against numpy 1.x
-opencv-python-headless<4.12     # 4.12+ requires numpy>=2

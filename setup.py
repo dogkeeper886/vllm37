@@ -588,6 +588,10 @@ def get_requirements() -> list[str]:
 
     if _no_device():
         requirements = _read_requirements("common.txt")
+    elif _is_cuda() and os.environ.get("VLLM_BUILD_LEGACY_CUDA", "0") == "1":
+        # Legacy CUDA builds (e.g. Tesla K80) bring their own PyTorch and
+        # xformers; cuda.txt pins versions that would replace them.
+        requirements = _read_requirements("common.txt")
     elif _is_cuda():
         requirements = _read_requirements("cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")

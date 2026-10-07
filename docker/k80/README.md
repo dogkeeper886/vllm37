@@ -18,10 +18,7 @@ cd docker/k80/
 # 1. Build builder image (~120 min first time)
 make build-builder
 
-# 2a. Build runtime from GitHub
-make build-runtime
-
-# 2b. OR build runtime from local source (for development)
+# 2. Build the runtime image from this checkout
 make build-local
 
 # 3. Run
@@ -48,8 +45,6 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JOBS` | 4 | Parallel build jobs |
-| `VLLM_REPO` | dogkeeper886/vllm37 | GitHub repo for runtime build |
-| `VLLM_BRANCH` | main | Git branch to clone |
 | `MODEL` | TinyLlama-1.1B | Model to serve |
 | `TP_SIZE` | 1 | Tensor parallel size (see safety note below before raising) |
 | `DTYPE` | float32 | Only float32 on K80 |
