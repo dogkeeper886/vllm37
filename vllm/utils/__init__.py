@@ -11,6 +11,7 @@ import enum
 import gc
 import getpass
 import hashlib
+import functools
 import importlib
 import importlib.metadata
 import importlib.util
@@ -2482,6 +2483,34 @@ except ValueError:
     vllm_lib = Library("vllm", "DEF")  # noqa
 
 
+def _use_typing_annotations(func: Callable) -> None:
+    """Rewrite PEP 585 generics (list[int]) in func's signature as their
+    typing equivalents (List[int]), which older torch.library accepts."""
+    import types
+    import typing
+
+    def convert(ann):
+        if isinstance(ann, types.GenericAlias):
+            args = tuple(convert(a) for a in typing.get_args(ann))
+            origin = typing.get_origin(ann)
+            if origin is list:
+                return typing.List[args]  # noqa: UP006
+            if origin is tuple:
+                return typing.Tuple[args]  # noqa: UP006
+            return ann
+        if typing.get_origin(ann) is typing.Union:
+            return typing.Union[tuple(convert(a) for a in typing.get_args(ann))]
+        return ann
+
+    sig = inspect.signature(func)
+    func.__signature__ = sig.replace(
+        parameters=[
+            p.replace(annotation=convert(p.annotation))
+            for p in sig.parameters.values()
+        ],
+        return_annotation=convert(sig.return_annotation))
+
+
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
@@ -2517,12 +2546,30 @@ def direct_register_custom_op(
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func,
-                                                mutates_args=mutates_args)
+        infer_schema = functools.partial(torch.library.infer_schema,
+                                         mutates_args=mutates_args)
     else:
         # for pytorch 2.4
         import torch._custom_op.impl
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
+        infer_schema = functools.partial(torch._custom_op.impl.infer_schema,
+                                         mutates_args=mutates_args)
+    try:
+        schema_str = infer_schema(op_func)
+    except ValueError:
+        # PyTorch < 2.5 only accepts typing.List/Optional annotations, not
+        # PEP 585 list[int]; retry with those spelled the old way.
+        _use_typing_annotations(op_func)
+        try:
+            schema_str = infer_schema(op_func)
+        except ValueError as e:
+            # Older PyTorch cannot describe some signatures (e.g. string
+            # defaults). Skip the op, as legacy builds without
+            # torch.library.custom_op do for every op.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Skipping custom op registration for '%s' on PyTorch %s: %s",
+                op_name, torch.__version__, e)
+            return
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

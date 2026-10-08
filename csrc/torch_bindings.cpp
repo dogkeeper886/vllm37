@@ -12,7 +12,9 @@
 //    function pointers with std::optional<T> parameters.
 // 2. IValue conversion: generic_to so the dispatcher can convert IValue to
 //    std::optional<T> at runtime.
-#ifdef VLLM_BUILD_LEGACY_CUDA
+// From PyTorch 2.2 c10::optional is std::optional and PyTorch defines both.
+#if defined(VLLM_BUILD_LEGACY_CUDA) && TORCH_VERSION_MAJOR == 2 && \
+    TORCH_VERSION_MINOR < 2
 #include <ATen/core/ivalue.h>
 #include <ATen/core/jit_type.h>
 

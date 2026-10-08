@@ -10,7 +10,7 @@ One staged script, `tools/k80-host/setup.sh`, builds the same stack everywhere:
 
 | Stage | Builds | Run by |
 |---|---|---|
-| `toolchain` | Python 3.10.16, venv, cuDNN 8.7 for CUDA 11, PyTorch v2.0.1 sm_37 wheel | host, builder image |
+| `toolchain` | Python 3.10.16, venv, cuDNN 8.7 for CUDA 11, PyTorch v2.4.1 sm_37 wheel | host, builder image |
 | `deps` | `docker/k80/requirements.txt` with `docker/k80/constraints.txt`; removes Triton | host, runtime image |
 | `xformers` | patched xformers v0.0.23 (`0.0.23+k80`) | host, runtime image |
 | `vllm` | this checkout (`VLLM_BUILD_LEGACY_CUDA=1`) | host (editable), runtime image |

@@ -38,8 +38,11 @@ os.environ['PYTORCH_NVML_BASED_CUDA_CHECK'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10480
 os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
-if hasattr(torch, '_inductor'):
-    torch._inductor.config.compile_threads = 1
+try:
+    import torch._inductor.config as _inductor_config
+    _inductor_config.compile_threads = 1
+except ImportError:  # e.g. PyTorch 2.0 builds without a usable inductor
+    pass
 
 # PyTorch < 2.1 lacks float8 dtypes. Add stubs so that third-party libs
 # (e.g. compressed_tensors) that reference torch.float8_e4m3fn at class

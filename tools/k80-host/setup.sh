@@ -4,7 +4,7 @@
 #
 # Usage: setup.sh [STAGE...]      (no stage = all four, in order)
 #   toolchain  Python 3.10.16, virtualenv, cuDNN 8.7 for CUDA 11,
-#              PyTorch v2.0.1 sm_37 wheel (about 1-2 h)
+#              PyTorch v$TORCH_VERSION sm_37 wheel (about 1-2 h)
 #   deps       vLLM's Python packages: docker/k80/requirements.txt
 #   xformers   patched xformers v0.0.23 (docker/k80/xformers-build/build.sh)
 #   vllm       vllm37 from this checkout
@@ -29,7 +29,8 @@ JOBS=${JOBS:-7}
 K80_EDITABLE=${K80_EDITABLE:-1}
 CONSTRAINTS="$REPO_ROOT/docker/k80/constraints.txt"
 PY_VERSION=3.10.16
-TORCH_TAG=v2.0.1
+TORCH_VERSION=2.4.1
+TORCH_TAG=v$TORCH_VERSION
 CUDNN_WHEEL="nvidia-cudnn-cu11==8.7.0.84"
 XFORMERS_VERSION=0.0.23+k80
 SRC=$K80_PREFIX/src
@@ -71,20 +72,23 @@ stage_toolchain() {
   ln -sf libcudnn.so.8 "$K80_PREFIX/cudnn/lib/libcudnn.so"
 
   local wheel
-  wheel=$(ls "$K80_PREFIX"/wheels/torch-2.0.1-*.whl 2>/dev/null | head -1 || true)
+  wheel=$(ls "$K80_PREFIX"/wheels/torch-"$TORCH_VERSION"-*.whl 2>/dev/null | head -1 || true)
   if [ -z "$wheel" ]; then
     echo "=== toolchain: PyTorch $TORCH_TAG ==="
-    [ -d "$SRC/pytorch" ] || git clone --depth 1 --branch "$TORCH_TAG" --recursive --shallow-submodules \
-      https://github.com/pytorch/pytorch.git "$SRC/pytorch"
-    cd "$SRC/pytorch"
+    [ -d "$SRC/pytorch-$TORCH_VERSION" ] || git clone --depth 1 --branch "$TORCH_TAG" --recursive --shallow-submodules \
+      https://github.com/pytorch/pytorch.git "$SRC/pytorch-$TORCH_VERSION"
+    cd "$SRC/pytorch-$TORCH_VERSION"
     pip install -q -c "$CONSTRAINTS" -r requirements.txt
-    # The tag's version.txt says 2.0.0a0; label the wheel with the real release.
-    PYTORCH_BUILD_VERSION=2.0.1 PYTORCH_BUILD_NUMBER=1 \
+    # A tag's version.txt carries a dev label (e.g. 2.0.0a0); label the wheel
+    # with the real release. Flash and memory-efficient attention kernels need
+    # sm_50+ and are not built for sm_37.
+    PYTORCH_BUILD_VERSION="$TORCH_VERSION" PYTORCH_BUILD_NUMBER=1 \
     CMAKE_PREFIX_PATH=/usr/local CMAKE_POLICY_VERSION_MINIMUM=3.5 \
     USE_CUDA=1 USE_CUDNN=1 USE_NCCL=1 USE_DISTRIBUTED=1 USE_MKLDNN=0 BUILD_TEST=0 \
+    USE_FLASH_ATTENTION=0 USE_MEM_EFFICIENT_ATTENTION=0 \
     MAX_JOBS="$JOBS" python setup.py bdist_wheel
-    cp dist/torch-2.0.1*.whl "$K80_PREFIX/wheels/"
-    wheel=$(ls "$K80_PREFIX"/wheels/torch-2.0.1-*.whl | head -1)
+    cp dist/torch-"$TORCH_VERSION"*.whl "$K80_PREFIX/wheels/"
+    wheel=$(ls "$K80_PREFIX"/wheels/torch-"$TORCH_VERSION"-*.whl | head -1)
   fi
   # Leave the source tree: from inside it, `import torch` finds the unbuilt package.
   cd "$K80_PREFIX"

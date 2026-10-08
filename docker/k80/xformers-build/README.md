@@ -12,7 +12,7 @@ When the workflow runs green:
 1. **NVCC + the K80 builder image's CUDA 11.4 toolchain accept** `TORCH_CUDA_ARCH_LIST=3.7` against XFormers v0.0.23 with our patches applied.
 2. **The XFormers Python sm_37 generate_kernels patch** (Story [#31][s31]) actually causes the autogen to materialize sm_37 kernel instantiations, and **the CUTLASS sm_37 trait patch** (Story [#25][s25]) lets those kernels compile via CUTLASS's SIMT path (verified bit-exact by Phase 1 Story [#29][s29]).
 3. **The CC gate patch** (Story [#32][s32]) lowers `AttentionOpBase.CUDA_MINIMUM_COMPUTE_CAPABILITY` from `(5, 0)` to `(3, 7)` so the dispatcher accepts K80 at runtime.
-4. **The resulting xformers installs cleanly** into the K80 builder image's Python 3.10 + PyTorch 2.0.1 environment.
+4. **The resulting xformers installs cleanly** into the K80 builder image's Python 3.10 + PyTorch environment (2.0.1 when written; 2.4.1 since #84).
 
 [s25]: https://github.com/dogkeeper886/vllm37/issues/25
 [s29]: https://github.com/dogkeeper886/vllm37/issues/29
@@ -82,7 +82,7 @@ RESULT: PASS — xformers built and imports cleanly
 
 ## Known caveats
 
-- **PyTorch 2.0.1 + XFormers v0.0.23 is at the edge of mutual support.** v0.0.23's `requirements.txt` says `torch >= 1.12`; we satisfy that. But specific Python imports inside XFormers may use APIs that drifted between PyTorch 2.0.x and 2.4.x. If the build succeeds but `import xformers` raises (e.g., missing attribute), that's a downstream patch we'd need to add.
+- **XFormers v0.0.23 predates PyTorch 2.4.** v0.0.23's `requirements.txt` says `torch >= 1.12`. It builds against PyTorch 2.4.1 and passes the GPU kernel test (#84); if a later PyTorch breaks an import inside XFormers, that is a downstream patch to add.
 - **XFormers v0.0.23 was the last tag with the cutlass mem-eff backend in-tree AND torch>=1.12.** See [`xformers-patches/README.md`](../xformers-patches/README.md) for the full pin rationale.
 - **`XFORMERS_DISABLE_TRITON=1`** is set during build to skip the Triton-based ops, which require sm_70+ for tensor cores anyway. Triton-on-Kepler is out of scope for this fork.
 
