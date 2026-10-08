@@ -10,7 +10,7 @@ Two simultaneous constraints force this pin:
 
 **Constraint 1 — cutlass mem-eff kernels must be in-tree.** After XFormers v0.0.29 (commit `3d947a6`, 2024-12-16, "Remove the cutlass backend of mem-eff, as it is now embedded in PyTorch"), the C++/CUDA mem-eff attention kernels were removed from XFormers entirely — they now live in PyTorch upstream. The Python wrapper `xformers/ops/fmha/cutlass.py` exists in both old and new XFormers, but only the old version has the C++/CUDA kernels behind it. So we need a tag **before v0.0.29**.
 
-**Constraint 2 — must work with PyTorch 2.0.1.** Our K80 fork is pinned to PyTorch 2.0.1 (`docker/k80/constraints.txt`) because the K80 driver R470 caps us at CUDA 11.4 (`docs/port/cuda-11.4-version-pins.md` §5.2). XFormers' PyTorch requirements bumped over time:
+**Constraint 2 — must work with the fork's PyTorch.** When this pin was set the fork ran PyTorch 2.0.1; since #84 it runs PyTorch 2.4.1 (`docker/k80/constraints.txt`), still within CUDA 11.4 because the K80 driver R470 caps it there (`docs/port/cuda-11.4-version-pins.md` §5.2). XFormers' PyTorch requirements bumped over time:
 
 | XFormers tag | Date | Required torch |
 |---|---|---|
@@ -22,7 +22,7 @@ Two simultaneous constraints force this pin:
 
 **The latest tag satisfying BOTH constraints: `v0.0.23`** (2023-12-06).
 
-The pin is essentially permanent: as long as the K80 fork stays on PyTorch 2.0.x (which is itself locked by the R470 driver constraint), v0.0.23 is the ceiling. If anyone ever finds a way to use a newer PyTorch on K80, the pin can be revisited up to v0.0.27.post2 (just before the v0.0.28 PyTorch bump and well before the v0.0.29 cutlass removal).
+With PyTorch 2.0.1, v0.0.23 was the ceiling. On PyTorch 2.4.1 (#84) v0.0.23 still builds and passes `test_cutlass_fp32.py`, and Constraint 2 now allows up to v0.0.28.post3 (the last tag before the v0.0.29 cutlass removal). Moving off v0.0.23 means porting the patches; nothing needs it yet.
 
 ## Why patches and not a fork
 

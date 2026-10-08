@@ -4,7 +4,7 @@
 # (Tesla K80). Story #33 of epic #12.
 #
 # Designed to run inside the K80 builder image (vllm37-builder:latest), which
-# has CUDA 11.4 + GCC 10 + PyTorch 2.0.1 + CMake 4 + Python 3.10. The script:
+# has CUDA 11.4 + GCC 10 + PyTorch 2.4.1 + CMake 4 + Python 3.10. The script:
 #
 #   1. Clones XFormers v0.0.23 with submodules (recursive — pulls bundled
 #      CUTLASS at e0aaa3c3 / Sep 2023 / pre-v3.5).
@@ -179,7 +179,7 @@ export XFORMERS_DISABLE_TRITON=1
 # for the artifact. The GitHub-log view is abbreviated by the workflow's own
 # `tail -200 /out/build.log` step. Truncating here would lose the full nvcc
 # output that we need to diagnose first-run failures on a novel
-# (PyTorch 2.0.1 + XFormers v0.0.23 + sm_37) combination.
+# (PyTorch 2.4.1 + XFormers v0.0.23 + sm_37) combination.
 pip install -v --no-build-isolation . 2>&1
 
 echo ""

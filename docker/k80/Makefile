@@ -25,7 +25,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-build-builder: ## Build the builder image (CUDA 11.4 + GCC 10 + Python 3.10 + PyTorch 2.0.1)
+build-builder: ## Build the builder image (CUDA 11.4 + GCC 10 + Python 3.10 + PyTorch 2.4.1)
 	docker build \
 		-t $(BUILDER_IMAGE) \
 		-f builder/Dockerfile \
@@ -97,8 +97,8 @@ verify-cutlass-patches: ## Verify cutlass-patches/*.patch apply cleanly to the p
 # XFormers pin — v0.0.23 (Dec 2023). Two simultaneous constraints force this:
 #   1. v0.0.29+ removed the cutlass mem-eff backend (commit 3d947a6)
 #   2. v0.0.24+ requires torch>=2.1; v0.0.28+ requires torch>=2.4. Our K80
-#      fork uses PyTorch 2.0.1 (docker/k80/constraints.txt), so we cap at
-#      v0.0.23 (torch>=1.12).
+#      fork was on PyTorch 2.0.1 when the patches were written; it now runs
+#      PyTorch 2.4.1 (docker/k80/constraints.txt), and v0.0.23 still builds.
 # v0.0.23 is the latest tag that satisfies BOTH constraints. See
 # xformers-patches/README.md for the full rationale.
 XFORMERS_PIN_TAG ?= v0.0.23

@@ -52,9 +52,9 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     PYTHONUNBUFFERED=1
 # VLLM_ATTENTION_BACKEND: the patched xformers cutlassF kernels run on sm_37.
-# TORCHDYNAMO_DISABLE: PyTorch 2.0 dynamo has broken SymInt handling.
+# TORCHDYNAMO_DISABLE: dynamo/Inductor compile through Triton, which cannot target sm_37.
 # NCCL_P2P_DISABLE: K80 is PCIe-only; P2P causes kernel timeouts with TP>1.
-# VLLM_WORKER_MULTIPROC_METHOD: spawn is safer for PyTorch 2.0 distributed.
+# VLLM_WORKER_MULTIPROC_METHOD: spawn avoids forking a process that already holds CUDA.
 
 EXPOSE 8000
 

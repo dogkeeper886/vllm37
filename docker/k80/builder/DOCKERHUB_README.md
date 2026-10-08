@@ -1,60 +1,49 @@
 # vllm37-builder
 
-Build environment for compiling [vLLM](https://github.com/vllm-project/vllm) with **Tesla K80** (CUDA compute capability 3.7) support.
+Build environment for [vllm37](https://github.com/dogkeeper886/vllm37), a vLLM fork for the **Tesla K80** (compute capability 3.7). CUDA 12 and current PyTorch wheels dropped Kepler, so this image carries a toolchain that still targets `sm_37`.
 
-NVIDIA dropped Kepler (sm_37) support in CUDA 12+, so this image pins an older toolchain that still targets it.
+## What's inside
 
-## What's Inside
+| Component | Version | Note |
+|---|---|---|
+| Base OS | Rocky Linux 8 | |
+| CUDA Toolkit | 11.4.4 | Highest CUDA that driver 470 (the last Kepler driver) runs |
+| GCC | 10.5.0 | Host compiler for CUDA 11.4 and PyTorch |
+| CMake | 4.0.1 | |
+| Python | 3.10.16 | virtualenv at `/opt/venv`, first on `PATH` |
+| cuDNN | 8.7.0 for CUDA 11 | Last cuDNN line listing SM 3.5+ on CUDA 11; in `/opt/k80/cudnn` |
+| PyTorch | 2.4.1, built from source | `TORCH_CUDA_ARCH_LIST="3.7"`; reports `2.4.1` |
+| NumPy | 1.26.4 | |
 
-| Component | Version | Why |
-|-----------|---------|-----|
-| Base OS | Rocky Linux 8 | Long-term support, RHEL-compatible |
-| CUDA Toolkit | 11.4.4 | Last toolkit line supporting sm_37 |
-| cuDNN | 8.x | Required for vLLM CUDA kernels |
-| GCC | 10.5.0 | Max version allowed by CUDA 11.4 |
-| CMake | 4.0.1 | Modern CMake for build configuration |
-| Python | 3.10.16 | Required by vLLM |
-| PyTorch | 2.0.1 (from source) | Built with `TORCH_CUDA_ARCH_LIST="3.7"` |
-| NumPy | 1.26.4 | PyTorch/vLLM dependency |
+Python, cuDNN and PyTorch come from the `toolchain` stage of [`tools/k80-host/setup.sh`](https://github.com/dogkeeper886/vllm37/blob/main/tools/k80-host/setup.sh), the same script the host build uses.
 
-## Usage
+## Use
+
+The runtime image builds on this one. From a vllm37 checkout:
 
 ```bash
 docker pull dogkeeper886/vllm37-builder:latest
-
-docker run -it dogkeeper886/vllm37-builder:latest bash
+docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest
+cd docker/k80
+make build-local      # vllm37 runtime image on top of this builder
+make run              # serves on port 8000
 ```
 
-### Build vLLM inside the container
+Install packages into this image only with the fork's pins (`pip install -c docker/k80/constraints.txt ...`). A plain `pip install` of upstream vLLM replaces the `sm_37` PyTorch with a CUDA 12 build that cannot run on a K80.
+
+## Rebuild
 
 ```bash
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -e .
+make -C docker/k80 build-builder JOBS=8    # about 2.5 h without cache
 ```
 
-## Build Args
+`JOBS` sets parallel compile jobs (about 2 GB of RAM each). Versions are set in `docker/k80/builder/Dockerfile` (GCC, CMake) and `tools/k80-host/setup.sh` (Python, cuDNN, PyTorch).
 
-The image can be rebuilt with custom versions:
+## Tags
 
-```bash
-docker build \
-  --build-arg CUDA_VERSION=11.4.4 \
-  --build-arg GCC_VERSION=10.5.0 \
-  --build-arg CMAKE_VERSION=4.0.1 \
-  --build-arg PYTHON_VERSION=3.10.16 \
-  --build-arg PYTORCH_VERSION=v2.0.1 \
-  --build-arg JOBS=4 \
-  -t vllm37-builder \
-  -f docker/k80/builder/Dockerfile .
-```
-
-> **Note:** The default `JOBS=4` keeps memory usage reasonable. Increase if your build machine has enough RAM (~2 GB per job for GCC/PyTorch).
-
-## Why This Exists
-
-The Tesla K80 (Kepler, compute 3.7) is still widely available on the used market and in older cloud instances. CUDA 12+ dropped Kepler support, so running modern ML frameworks on K80 requires carefully pinned toolchain versions. This image provides that ready-made environment.
+- `latest` — current builder
+- `YYYY-MM-DD` — builders kept by date
 
 ## Related
 
-- [dogkeeper886/ollama37](https://hub.docker.com/r/dogkeeper886/ollama37) — Ollama built with K80 support
+- [dogkeeper886/ollama37](https://hub.docker.com/r/dogkeeper886/ollama37) — Ollama built for the K80

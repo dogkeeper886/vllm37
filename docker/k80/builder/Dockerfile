@@ -1,7 +1,7 @@
 # vLLM K80 Builder Image
 # Rocky Linux 8 with CUDA 11.4, GCC 10.5 and CMake 4, plus the toolchain stage
 # of tools/k80-host/setup.sh: Python 3.10.16, a virtualenv at /opt/venv,
-# cuDNN 8.7 for CUDA 11 and a PyTorch v2.0.1 sm_37 wheel. The host build runs
+# cuDNN 8.7 for CUDA 11 and a PyTorch v2.4.1 sm_37 wheel. The host build runs
 # the same script, so both get the same stack.
 #
 # Build (from the repo root; the Makefile does this):
@@ -62,7 +62,7 @@ ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # ============================================================================
-# GCC 10 from source (Rocky 8 ships GCC 8 which is too old for PyTorch 2.0)
+# GCC 10 from source (Rocky 8 ships GCC 8, too old for PyTorch 2.x)
 # ============================================================================
 RUN cd /tmp && \
     wget -q https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz && \
@@ -99,7 +99,7 @@ RUN cd /tmp && \
     cd /tmp && rm -rf cmake-${CMAKE_VERSION}*
 
 # ============================================================================
-# Toolchain stage: Python 3.10.16, venv, cuDNN 8.7, PyTorch v2.0.1 (sm_37)
+# Toolchain stage: Python 3.10.16, venv, cuDNN 8.7, PyTorch v2.4.1 (sm_37)
 # ============================================================================
 ENV K80_PREFIX=/opt/k80 \
     K80_VENV=/opt/venv

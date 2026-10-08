@@ -1,6 +1,6 @@
 # K80 Docker images
 
-The K80 stack builds as two images. The **builder** (`builder/Dockerfile`) holds Rocky Linux 8, CUDA 11.4, GCC 10.5 and CMake 4, plus the `toolchain` stage of [`tools/k80-host/setup.sh`](../../tools/k80-host/setup.sh): Python 3.10.16 in `/opt/venv`, cuDNN 8.7 for CUDA 11 and PyTorch 2.0.1 for `sm_37`. The **runtime** image (`runtime/Dockerfile.local`) adds the `deps`, `xformers` and `vllm` stages on top and serves vLLM's OpenAI-compatible API on port 8000. The host build runs the same script, so both get the same stack.
+The K80 stack builds as two images. The **builder** (`builder/Dockerfile`) holds Rocky Linux 8, CUDA 11.4, GCC 10.5 and CMake 4, plus the `toolchain` stage of [`tools/k80-host/setup.sh`](../../tools/k80-host/setup.sh): Python 3.10.16 in `/opt/venv`, cuDNN 8.7 for CUDA 11 and PyTorch 2.4.1 for `sm_37`. The **runtime** image (`runtime/Dockerfile.local`) adds the `deps`, `xformers` and `vllm` stages on top and serves vLLM's OpenAI-compatible API on port 8000. The host build runs the same script, so both get the same stack.
 
 ## Build and run
 
@@ -116,7 +116,7 @@ docker/k80/
 ├── builder/Dockerfile        # OS, CUDA 11.4, GCC 10.5, CMake 4 + setup.sh toolchain
 ├── runtime/Dockerfile.local  # setup.sh deps, xformers, vllm; engine env; entrypoint
 ├── requirements.txt          # Python packages (common.txt + Ray)
-├── constraints.txt           # torch==2.0.1, numpy<2, opencv<4.12
+├── constraints.txt           # torch==2.4.1, transformers<5, numpy<2, opencv<4.12
 ├── docker-compose.yml        # GPUs, ports, cache and log mounts, per-run settings
 ├── Makefile                  # build-builder, build-local, run, stop, logs, verify-*-patches
 ├── .env.example              # settings template

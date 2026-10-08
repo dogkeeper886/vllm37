@@ -11,7 +11,7 @@ not measured.
 
 ## The constraint: the fork's base is mid-2025
 
-This fork's vLLM is ~v0.10 (Aug 2025) with `transformers >= 4.55` and torch 2.0.1.
+This fork's vLLM is ~v0.10 (Aug 2025) with transformers 4.55–4.57 and torch 2.4.1.
 A model loads only if the base knows its architecture. That splits current
 models into three tiers:
 

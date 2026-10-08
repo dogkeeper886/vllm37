@@ -20,7 +20,7 @@ tools/k80-host/setup.sh          # all stages; first run about 1.5-2 h (PyTorch)
 tools/k80-host/setup.sh vllm     # after a source change: rebuild only vLLM
 ```
 
-Stages: `toolchain` (Python 3.10.16, venv, cuDNN 8.7, PyTorch 2.0.1), `deps`, `xformers`, `vllm`. The Docker builder runs `toolchain`; the runtime image runs the other three. Puts Python, cuDNN, sources and wheels in `~/opt/k80` (`K80_PREFIX`) and the virtualenv in `~/.venvs/vllm37` (`K80_VENV`). Every pip install uses `docker/k80/constraints.txt`.
+Stages: `toolchain` (Python 3.10.16, venv, cuDNN 8.7, PyTorch 2.4.1), `deps`, `xformers`, `vllm`. The Docker builder runs `toolchain`; the runtime image runs the other three. Puts Python, cuDNN, sources and wheels in `~/opt/k80` (`K80_PREFIX`) and the virtualenv in `~/.venvs/vllm37` (`K80_VENV`). Every pip install uses `docker/k80/constraints.txt`.
 
 ## Serve
 

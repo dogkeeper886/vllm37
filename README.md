@@ -11,7 +11,7 @@ vllm37 swaps each part of vLLM that needs a newer GPU for one the K80 can execut
 | Upstream vLLM needs | vllm37 uses |
 |---|---|
 | CUDA 12, compute capability ≥ 7.0 | CUDA 11.4, kernels compiled for `sm_37` |
-| PyTorch 2.x wheels (no Kepler build) | PyTorch 2.0.1 built from source for `sm_37`, cuDNN 8.7 for CUDA 11 |
+| PyTorch 2.x wheels (no Kepler build) | PyTorch 2.4.1 built from source for `sm_37`, cuDNN 8.7 for CUDA 11 |
 | FlashAttention, FlashInfer or Triton attention | xformers v0.0.23 `cutlassF` kernels, patched for `sm_37` |
 | V1 engine, `torch.compile`, CUDA graphs | V0 engine, eager mode (`--enforce-eager`) |
 | BF16 / FP16 math | FP32 (`--dtype float32`) |
@@ -45,6 +45,7 @@ Measured on 2× Tesla K80 (4 GPU dies, 11.4 GiB each):
 |---|---|---|
 | `Qwen/Qwen3-0.6B` | TP=1, XFormers | CI golden output; context up to 16,384 tokens (11,252-token prompt: 22 s prefill) |
 | `Qwen/Qwen3-0.6B` | TP=1, Torch SDPA | Same output as XFormers |
+| `Qwen/Qwen3-0.6B` | TP=1, `--model-impl transformers` | Same output, through transformers' own model code |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | TP=1 | Previous CI golden output |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | TP=2 | Worked in earlier testing; not re-run since the 2026-10 build changes |
 
@@ -57,7 +58,6 @@ Tracked in [#78](https://github.com/dogkeeper886/vllm37/issues/78):
 - Quantized checkpoints (GPTQ, AWQ, FP8, GGUF and others): their kernels use instructions the K80 lacks. A K80 int4 kernel is planned in #73 and #74.
 - MoE models: `vllm._moe_C` fails to load (D11).
 - Guided decoding returns unconstrained text (D12).
-- Models that need transformers' PyTorch support: every transformers version this fork allows requires PyTorch ≥ 2.1 (D10).
 - Models that mix sliding-window and full attention layers are capped at the window size (Gemma 3 270m/1b: 512 tokens), and attention supports head dimensions up to 256.
 
 ## Build
