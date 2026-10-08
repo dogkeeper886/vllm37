@@ -1,62 +1,49 @@
-# vLLM for Tesla K80 (sm_37) + CUDA 11.4
+# K80 Docker images
 
-Two-stage Docker build system for running vLLM on Tesla K80 GPUs
-(compute capability 3.7). Follows the `dogkeeper886/ollama37` build pattern:
-Rocky Linux 8, CUDA 11.4, GCC 10, CMake 4.
+The K80 stack builds as two images. The **builder** (`builder/Dockerfile`) holds Rocky Linux 8, CUDA 11.4, GCC 10.5 and CMake 4, plus the `toolchain` stage of [`tools/k80-host/setup.sh`](../../tools/k80-host/setup.sh): Python 3.10.16 in `/opt/venv`, cuDNN 8.7 for CUDA 11 and PyTorch 2.0.1 for `sm_37`. The **runtime** image (`runtime/Dockerfile.local`) adds the `deps`, `xformers` and `vllm` stages on top and serves vLLM's OpenAI-compatible API on port 8000. The host build runs the same script, so both get the same stack.
 
-## Hardware Target
-
-- 2x Tesla K80 cards (4 GPU dies, 12GB each, 48GB total)
-- Tensor parallelism across all 4 dies
-- Models up to ~4B parameters in FP32
-
-## Quick Start
+## Build and run
 
 ```bash
-cd docker/k80/
+cd docker/k80
 
-# 1. Build builder image (~120 min first time)
-make build-builder
+# Builder: pull the published one, or build it (~2 h)
+docker pull dogkeeper886/vllm37-builder:latest
+docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest
+# make build-builder
 
-# 2. Build the runtime image from this checkout
-make build-local
-
-# 3. Run
-make run
+make build-local     # runtime image from this checkout
+make run             # docker compose up -d
 make logs
-
-# 4. Test
-curl http://localhost:8000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "prompt": "Hello", "max_tokens": 50}'
+make stop
 ```
 
-## Configuration
+`make build-local` orders the layers from least to most often changed (`deps` → `xformers` → `vllm`), so a source-only change rebuilds just the `vllm` stage (~4 min with `JOBS=8`). The image is labelled with the source commit (`org.opencontainers.image.revision`); CI rebuilds when the label differs from the branch.
 
-Optional — the Makefile and compose file both have sensible built-in defaults.
-To override, copy the template and edit:
+## Settings
 
-```bash
-cp .env.example .env
-```
+`docker-compose.yml` reads these from `.env` (copy `.env.example`) or the shell:
 
-`.env` values apply to both `make build-*` and `make run`. Available settings:
+| Variable | Default | Meaning |
+|---|---|---|
+| `JOBS` | 4 | Parallel compile jobs for `make build-*` |
+| `MODEL` | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | Model to serve |
+| `TP_SIZE` | 1 | Tensor parallel size: 1 or 2 (see Safety) |
+| `DTYPE` | `float32` | Weight and compute dtype |
+| `MAX_MODEL_LEN` | 2048 | Context length |
+| `GPU_MEM_UTIL` | 0.85 | Fraction of each die's memory vLLM may use |
+| `VLLM_ATTENTION_BACKEND` | `XFORMERS` | `XFORMERS` or `TORCH_SDPA` |
+| `VLLM_K80_TRACE` | 0 | 1 = TP-init trace logging (below) |
+| `HF_HOME` | `~/.cache/huggingface` | Hugging Face cache mounted into the container |
+| `VLLM_LOG_DIR` | `/tmp/vllm-logs` | Host directory for vLLM and NCCL logs |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JOBS` | 4 | Parallel build jobs |
-| `MODEL` | TinyLlama-1.1B | Model to serve |
-| `TP_SIZE` | 1 | Tensor parallel size (see safety note below before raising) |
-| `DTYPE` | float32 | Only float32 on K80 |
+Engine settings that do not change per run (`VLLM_USE_V1=0`, `TORCHDYNAMO_DISABLE=1`, `NCCL_P2P_DISABLE=1`, `VLLM_WORKER_MULTIPROC_METHOD=spawn`) live in `runtime/Dockerfile.local`. Python packages come from `requirements.txt`, pinned by `constraints.txt`; both are shared with the host build.
 
-### TP safety
+## Safety
 
-`TP_SIZE` defaults to `1` because TP>1 on 2x K80 has triggered full system hangs
-on this hardware — even inside a KVM guest with vLLM inside a container. Before
-raising it, enhance host-side logging (`dmesg`, `journalctl`, `nvidia-smi dmon`)
-so a hang is diagnosable post-mortem. TP=4 is additionally power-risky on a
-shared CPU EPS connector and is currently unvalidated. See the project
-`CLAUDE.md` for the authoritative safety rules.
+- **Keep `TP_SIZE` at 1 or 2.** TP=4 runs both K80 boards from one CPU power cable and has halted this machine; TP>1 has also hung the system before.
+- **Leave GPU power limits at their defaults.** Changing them (`nvidia-smi -pl`) has halted this machine.
+- **Keep `NCCL_P2P_DISABLE=1`.** The K80 is PCIe-only; P2P causes kernel timeouts with TP>1.
 
 ## Diagnosing a hang
 
@@ -118,52 +105,28 @@ runtime and never touches Python's stdio layer.
 
 ### Phase-1 validation policy
 
-TP=1 is the current CI default and the only configuration validated to work on
-this hardware. **Do not attempt TP >= 2** until (a) Phase-1 has demonstrated
-that trace lines and NCCL logs actually land in the artifact on TP=1, and (b)
-host-side `dmesg` / `nvidia-smi dmon` capture is wired into the workflow. See
-issue #10 for status.
+TP=1 is the CI default. Before running TP=2, make sure host-side `dmesg` /
+`nvidia-smi dmon` capture is running so a hang can be diagnosed afterwards; CI
+does not capture these yet. TP=4 stays off (see Safety below).
 
-## Architecture
+## Files
 
 ```
 docker/k80/
-├── builder/
-│   └── Dockerfile          # CUDA 11.4 + GCC 10 + CMake 4 + Python 3.10 + PyTorch 2.0.1
-├── runtime/
-│   ├── Dockerfile          # Clone from GitHub, build vLLM
-│   └── Dockerfile.local    # Copy local source, build vLLM
-├── Makefile                # Build orchestration
-├── docker-compose.yml      # Runtime with GPU access
-├── .env.example            # Configuration template (copy to .env)
-└── README.md               # This file
+├── builder/Dockerfile        # OS, CUDA 11.4, GCC 10.5, CMake 4 + setup.sh toolchain
+├── runtime/Dockerfile.local  # setup.sh deps, xformers, vllm; engine env; entrypoint
+├── requirements.txt          # Python packages (common.txt + Ray)
+├── constraints.txt           # torch==2.0.1, numpy<2, opencv<4.12
+├── docker-compose.yml        # GPUs, ports, cache and log mounts, per-run settings
+├── Makefile                  # build-builder, build-local, run, stop, logs, verify-*-patches
+├── .env.example              # settings template
+├── ci/                       # golden.json and scripts used by the k80-* workflows
+├── xformers-build/           # xformers build script and GPU kernel test
+├── xformers-patches/         # sm_37 patches for xformers v0.0.23
+├── cutlass-patches/          # Sm37 arch trait for CUTLASS
+└── cutlass-repro/            # CUTLASS Sm37 SGEMM vs cuBLAS check
 ```
 
 ## CI
 
-K80 workflows live under `.github/workflows/k80-*.yml`, run on the self-hosted
-runner, and are manually triggered (`workflow_dispatch`).
-
-`k80-pipeline.yml` composes `k80-build.yml` + `k80-runtime.yml` via
-`workflow_call`. So `gh run list --workflow="K80 Docker Build"` showing zero
-direct runs does NOT mean the workflow is unused — pipeline invocations surface
-under the *caller* (`K80 Full Pipeline`).
-
-Other workflows (`k80-host-info`, `k80-cutlass-repro`, `k80-xformers-build`,
-`k80-context-stress`) are standalone and exercise specific stories — see each
-file's header comment for purpose and related issue numbers.
-
-## Key Build Flags
-
-- `TORCH_CUDA_ARCH_LIST="3.7"` - Target K80 compute capability
-- `VLLM_BUILD_LEGACY_CUDA=1` - Skip CUTLASS-dependent kernels (require sm_70+)
-- `VLLM_USE_V1=0` - Use V0 engine (V1 requires PyTorch 2.5+)
-- `VLLM_ATTENTION_BACKEND=TORCH_SDPA` - Use PyTorch SDPA (no xformers/flash-attn)
-
-## Limitations
-
-- FP32 only (K80 lacks native FP16 compute, no BF16)
-- No CUDA graphs (requires sm_70+)
-- No flash attention or xformers
-- No CUTLASS quantization kernels
-- Eager mode only (no torch.compile)
+The `k80-*` workflows in `.github/workflows/` build and test these images on the self-hosted runner; see the CI section of the [root README](../../README.md#ci). `k80-pipeline.yml` calls `k80-build.yml` and `k80-runtime.yml`, so their runs appear under "K80 Full Pipeline".
