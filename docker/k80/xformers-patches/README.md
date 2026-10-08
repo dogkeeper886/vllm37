@@ -10,7 +10,7 @@ Two simultaneous constraints force this pin:
 
 **Constraint 1 — cutlass mem-eff kernels must be in-tree.** After XFormers v0.0.29 (commit `3d947a6`, 2024-12-16, "Remove the cutlass backend of mem-eff, as it is now embedded in PyTorch"), the C++/CUDA mem-eff attention kernels were removed from XFormers entirely — they now live in PyTorch upstream. The Python wrapper `xformers/ops/fmha/cutlass.py` exists in both old and new XFormers, but only the old version has the C++/CUDA kernels behind it. So we need a tag **before v0.0.29**.
 
-**Constraint 2 — must work with PyTorch 2.0.1.** Our K80 fork is pinned to PyTorch 2.0.1 (`CLAUDE.md`) because the K80 driver R470 caps us at CUDA 11.4 (`docs/port/cuda-11.4-version-pins.md` §5.2). XFormers' PyTorch requirements bumped over time:
+**Constraint 2 — must work with PyTorch 2.0.1.** Our K80 fork is pinned to PyTorch 2.0.1 (`docker/k80/constraints.txt`) because the K80 driver R470 caps us at CUDA 11.4 (`docs/port/cuda-11.4-version-pins.md` §5.2). XFormers' PyTorch requirements bumped over time:
 
 | XFormers tag | Date | Required torch |
 |---|---|---|

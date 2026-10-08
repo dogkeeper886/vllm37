@@ -93,7 +93,7 @@ Patch types (via 27 `patch_file` / `patch_file_regex` invocations across 12 logi
 - Guards `cooperative_groups/reduce.h` and `cg::this_grid()`
 - **Disables `GGML_CUDA_FA` (Flash Attention) entirely** — sm_30 lacks FP16 / tensor cores, so they fall back to the standard attention path
 
-**Reusable for sm_37? Directly.** sm_37 is sm_30's bigger cousin (same Kepler family, GK210 vs GK1xx). Almost every patch is exactly what we need; only the disabled-bf16 stub may be unnecessary on sm_37 if we ever want to use FP32 throughout (which we do, per CLAUDE.md). The "disables FA" note is the **practical baseline** — it confirms what every other Kepler user has done is run without flash attention, which matches what our K80 fork does today (Torch SDPA only).
+**Reusable for sm_37? Directly.** sm_37 is sm_30's bigger cousin (same Kepler family, GK210 vs GK1xx). Almost every patch is exactly what we need; only the disabled-bf16 stub may be unnecessary on sm_37 if we ever want to use FP32 throughout (which we do; see the README). The "disables FA" note is the **practical baseline** — it confirms what every other Kepler user has done is run without flash attention. (At the time of writing our K80 fork used Torch SDPA only; it now uses patched xformers `cutlassF`.)
 
 Status: active, last push 2026-03-29. License: not declared (upstream llama.cpp is MIT — derivative).
 
@@ -101,7 +101,7 @@ Status: active, last push 2026-03-29. License: not declared (upstream llama.cpp 
 
 URL: https://github.com/dogkeeper886/ollama37
 
-This is the user's own K80-targeting Ollama fork (mentioned in `CLAUDE.md` and study plan issue [#2](https://github.com/dogkeeper886/vllm37/issues/2)). Not external prior art, but listed here for completeness because:
+This is the user's own K80-targeting Ollama fork (mentioned in study plan issue [#2](https://github.com/dogkeeper886/vllm37/issues/2)). Not external prior art, but listed here for completeness because:
 
 - It already pins **the same toolchain we use** (CUDA 11.4 / GCC 10 / driver 470, on Rocky Linux). The K80 builder image in `docker/k80/` here is direct kin.
 - It already has a working CI flow on K80 hardware (the same self-hosted runner backing this fork).
@@ -151,7 +151,7 @@ Three wheel-distribution projects exist:
 | [`neverclover/PyTorch2.x-wheels-for-k80`](https://github.com/neverclover/PyTorch2.x-wheels-for-k80) | sm_37 | torch 2.x + CUDA 11.8 + Python 3.12 | 2025-12 | not stated |
 | [`jeremistderechte/PyTorch-Kepler-Wheels`](https://github.com/jeremistderechte/PyTorch-Kepler-Wheels) | sm_35 only (K20/K40, **not K80**) | older | 2024-09 | none |
 
-Reusable for us? **Indirect.** Our K80 fork is pinned to **torch 2.0.1 + CUDA 11.4** (per `CLAUDE.md`). These projects build against newer toolchains, so the wheels themselves are not drop-in. But:
+Reusable for us? **Indirect.** Our K80 fork is pinned to **torch 2.0.1 + CUDA 11.4** (`docker/k80/constraints.txt`). These projects build against newer toolchains, so the wheels themselves are not drop-in. But:
 
 - `xiaoran007/Pytorch-for-Kepler` is the most useful playbook (BSD-3 licensed; sm_37 explicitly supported; documented build process).
 - They demonstrate that newer torch *can* be coaxed onto K80 — useful if we ever want to upgrade the torch pin within the CUDA 11.4 / driver R470 envelope.
@@ -168,7 +168,7 @@ No upstream llama.cpp **PR** has merged sm_37 support; all known support is via 
 
 ### 3.8 bitsandbytes / GPTQ / AWQ on Kepler — confirmed gap
 
-[`bitsandbytes-foundation/bitsandbytes`](https://github.com/bitsandbytes-foundation/bitsandbytes) officially requires sm_60+ in recent releases. Searched: no public backport to sm_37/sm_50 found. The blanket "no quantization on K80" line in `CLAUDE.md` stands.
+[`bitsandbytes-foundation/bitsandbytes`](https://github.com/bitsandbytes-foundation/bitsandbytes) officially requires sm_60+ in recent releases. Searched: no public backport to sm_37/sm_50 found. No ready-made Kepler kernel exists. `docs/port/model-family-requirements.md` Part 9 later showed weight-only int4 is feasible with a new FP32 kernel (#73, #74).
 
 ## 4. Tier 3: Academic / research
 

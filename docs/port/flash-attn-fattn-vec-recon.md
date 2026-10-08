@@ -8,7 +8,7 @@ This doc is the recon for adopting that kernel as the structural reference for v
 
 - `ggml`'s `fattn-vec.cuh` (vendored into `ollama37`) is a hand-written, FP32-fallback-capable FlashAttention-family vector kernel that compiles for sm_37 with CUDA 11.4 and produces bit-exact output vs the non-FA reference path on K80 (gemma3:4b, [run 24960034243](https://github.com/dogkeeper886/ollama37/actions/runs/24960034243)).
 - The kernel uses no tensor cores, no MMA, no `cp.async`, no GMMA/TMA. Just warp-cooperative loads, online softmax, FP32 accumulators on K80.
-- For vLLM's K80 fork (FP32-only per `CLAUDE.md`), most of `fattn-vec`'s complexity (Q4_0/Q8_0 K-V quant, FP16 fast paths, ALiBi, logit softcap) can drop in v1.
+- For vLLM's K80 fork (FP32-only per the [README](../../README.md#how-vllm37-runs-on-a-k80)), most of `fattn-vec`'s complexity (Q4_0/Q8_0 K-V quant, FP16 fast paths, ALiBi, logit softcap) can drop in v1.
 - The work is not algorithm design — it's interface translation: replace `ggml_tensor` I/O with vLLM's paged-KV + cu_seqlens + Torch tensor convention.
 - This re-frames Phase 3 from a research project into a porting/adaptation project with a known-good algorithmic reference.
 
@@ -220,12 +220,12 @@ Single biggest item: paged-KV indirection. Affects every K/V load in the inner l
 
 ## 5. Simplifications under vLLM K80 fork's FP32-only constraint
 
-Per `CLAUDE.md` ("FP32 only → max ~7B TP=4, ~2B single die") the vLLM K80 fork serves FP32 models. This drops a substantial chunk of fattn-vec's complexity:
+The vLLM K80 fork serves FP32 models (about 2B parameters per die; [README](../../README.md#what-runs-today)). This drops a substantial chunk of fattn-vec's complexity:
 
 | fattn-vec feature | Used in v1 vLLM port? | Reason |
 |---|---|---|
 | FAST_FP16_AVAILABLE branch | **no** — only the FP32 fallback path | K80 doesn't have it; vLLM K80 fork is FP32 anyway |
-| Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 K-V quant | **no** — F32 K/V only | vLLM's K80 fork doesn't support quantization; CLAUDE.md §"Hardware constraints" |
+| Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 K-V quant | **no** — F32 K/V only | vLLM's K80 fork has no quantized kernels yet; see `docs/port/model-family-requirements.md` Part 9 |
 | `q8_1` Q-side quant block (line 139-186) | **no** — Q is F32 | as above |
 | ALiBi slopes | **no** in v1 | TinyLlama / gpt-oss / gemma3 use rope/no-bias; defer |
 | Logit softcap | **no** in v1 | Gemma-2/3 specific; defer |
@@ -318,7 +318,7 @@ This sits alongside the Phase 2 chain (XFormers / cutlassF) as a *second* backen
 - `docs/port/flash-attn-mma.md` — Story 0.2's original recon (pre-fattn-vec discovery)
 - `vllm/attention/backends/flash_attn.py:663` — vLLM FA backend forward signature
 - `vllm/platforms/cuda.py:368` — Kepler dispatcher gate (added PR #66)
-- `CLAUDE.md` — FP32-only constraint
+- `README.md` — FP32 serving
 - `docker/k80/cutlass-patches/` and `xformers-patches/` — Phase 1 + 2 patch precedents
 - Epic [#12][epic], Phase 3 portal [#16][phase3-portal]
 

@@ -53,7 +53,7 @@ This empirically confirms what Story 0.3 inferred:
 - **Driver 470.256.02** — exactly the latest R470 release whose release notes Story 0.3 cited. R470 is the last branch supporting Kepler.
 - **Driver-reported CUDA Version: 11.4** — matches our toolkit pin.
 - **Two compute dies exposed as separate CUDA devices** (Bus IDs `04:00.0` and `07:00.0`). Each die has 11441 MiB ≈ **11.45 GiB** VRAM. This is consistent with the public K80 datasheet (12 GiB per die, less reserved overhead).
-- **Per-die power cap: 149 W** (`Pwr:Usage/Cap` reports the runtime cap, settable via `nvidia-smi -pl` — which `CLAUDE.md` forbids on this hardware). Two dies × 149 W ≈ 298 W under cap, consistent with the public 300 W board TDP.
+- **Per-die power cap: 149 W** (`Pwr:Usage/Cap` reports the runtime cap, settable via `nvidia-smi -pl` — which [the README's hardware safety rules](../../README.md#hardware-safety) forbid on this hardware). Two dies × 149 W ≈ 298 W under cap, consistent with the public 300 W board TDP.
 - **The host has no nvcc on PATH.** Toolchain lives inside the K80 builder Docker image (CUDA 11.4 toolkit), not on the host. Driver and toolkit are deliberately separated.
 
 This closes Story 0.3's open question about the precise runner driver version.
@@ -135,7 +135,7 @@ From the runner's `nvidia-smi` output (§2) and the public K80 datasheet:
 
 - **Dual-die board:** 2× GK210, exposed as two CUDA devices. ✓ confirmed empirically.
 - **Per-die:** 11441 MiB VRAM, 149 W runtime power cap (per `nvidia-smi`). ✓ confirmed empirically.
-- **Board TDP:** ~300 W. Confirms `CLAUDE.md`'s power-risk rule: TP=2 lights up both dies, putting full board draw on the rail. The K80 EPS-cable observation in `CLAUDE.md` ("2× K80 on a shared CPU EPS connector can exceed the rail rating under full load") follows from this — the rail constraint is real and unmodelable from spec sheets alone. The 149 W per-die cap is a *runtime* setting reported by `Pwr:Usage/Cap`; it can be modified by `nvidia-smi -pl`, which `CLAUDE.md` explicitly forbids on this hardware (has caused system halts in the past).
+- **Board TDP:** ~300 W. Confirms the power-risk rule in [the README's hardware safety section](../../README.md#hardware-safety): TP=2 lights up both dies, putting full board draw on the rail. The K80 EPS-cable observation ("2× K80 on a shared CPU EPS connector can exceed the rail rating under full load") follows from this — the rail constraint is real and unmodelable from spec sheets alone. The 149 W per-die cap is a *runtime* setting reported by `Pwr:Usage/Cap`; it can be modified by `nvidia-smi -pl`, which the safety rules forbid on this hardware (has caused system halts in the past).
 - **PCIe Gen3 x16, no NVLink.** Already encoded in `NCCL_P2P_DISABLE=1` from prior K80 work.
 
 This information also bounds the long-context unlock claim of Story #54. Phase-1 instrumentation in PR #11 (CI run [24897047481][run-24897047481], TinyLlama-1.1B FP32 at TP=1) measured the actual VRAM trajectory:
