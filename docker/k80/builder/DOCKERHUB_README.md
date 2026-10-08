@@ -11,7 +11,7 @@ Build environment for [vllm37](https://github.com/dogkeeper886/vllm37), a vLLM f
 | GCC | 10.5.0 | Host compiler for CUDA 11.4 and PyTorch |
 | CMake | 4.0.1 | |
 | Python | 3.10.16 | virtualenv at `/opt/venv`, first on `PATH` |
-| cuDNN | 8.7.0 for CUDA 11 | Last cuDNN line listing SM 3.5+ on CUDA 11; in `/opt/k80/cudnn` |
+| cuDNN | 8.7.0 for CUDA 11 | Its support matrix lists SM 3.5 and later; in `/opt/k80/cudnn` |
 | PyTorch | 2.4.1, built from source | `TORCH_CUDA_ARCH_LIST="3.7"`; reports `2.4.1` |
 | NumPy | 1.26.4 | |
 
