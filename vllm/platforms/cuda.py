@@ -373,6 +373,12 @@ class CudaPlatformBase(Platform):
         # back to SDPA when xformers is not installed so non-K80 builds and
         # any future Kepler users without our patches still work.
         if not cls.has_device_capability(60):
+            if selected_backend == _Backend.TORCH_SDPA:
+                # Explicit request, e.g. CI comparing against XFormers.
+                logger.info(
+                    "Using Torch SDPA attention backend for Kepler GPU "
+                    "(sm < 60, requested by VLLM_ATTENTION_BACKEND).")
+                return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
             try:
                 import xformers  # noqa: F401
                 logger.info(

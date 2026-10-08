@@ -1,52 +1,38 @@
 ---
 name: k80-build
-description: Build vLLM for Tesla K80 (sm_37) using the Docker builder/runtime pattern. Use when you need to produce a `vllm37-local` image, or are considering a host build (don't).
-argument-hint: [local|github|builder]
+description: Build vLLM for Tesla K80 (sm_37) on the host or as the Docker builder/runtime images. Use when you need a host build to iterate on, or a `vllm37-local` image.
+argument-hint: [host|local|builder]
 ---
 
 # K80 Build
 
-Build vLLM for Tesla K80 via Docker. **Never build on the host** — CUDA 11.4 +
-GCC 10 + PyTorch 2.0.1 + sm_37 combination is pinned inside the builder image.
+One staged script, `tools/k80-host/setup.sh`, builds the same stack everywhere:
 
-## When to use
-- Producing a runtime image to test code changes
-- Rebuilding after touching `csrc/`, `setup.py`, `docker/k80/requirements.txt` or `docker/k80/constraints.txt`
-- Building on a clean machine (pull `dogkeeper886/vllm37-builder` first)
-
-## Environment
-- CUDA 11.4.4, GCC 10.5, CMake 4, Python 3.10, PyTorch 2.0.1
-- Target: Tesla K80 (compute capability 3.7)
-- Host toolchain: ignored — everything runs in Docker
+| Stage | Builds | Run by |
+|---|---|---|
+| `toolchain` | Python 3.10.16, venv, cuDNN 8.7 for CUDA 11, PyTorch v2.0.1 sm_37 wheel | host, builder image |
+| `deps` | `docker/k80/requirements.txt` with `docker/k80/constraints.txt`; removes Triton | host, runtime image |
+| `xformers` | patched xformers v0.0.23 (`0.0.23+k80`) | host, runtime image |
+| `vllm` | this checkout (`VLLM_BUILD_LEGACY_CUDA=1`) | host (editable), runtime image |
 
 ## Build types
-- **builder** — `make build-builder` (CUDA + GCC + PyTorch 2.0.1 base, ~120 min first time)
-- **local** — `make build-local` (compile current checkout against the builder, ~10 min)
 
-## Commands
-```bash
-cd docker/k80
+- **host** — `tools/k80-host/setup.sh` (first run ~1.5–2 h; then `setup.sh vllm` after source changes). Needs driver 470, CUDA 11.4, GCC 10 and the Python build headers; see `tools/k80-host/README.md`. Serve with `tools/k80-host/serve.sh`.
+- **local** — `cd docker/k80 && make build-local` builds `vllm37-local` on the builder. A source-only change rebuilds just the `vllm` stage (~4 min with `JOBS=8`).
+- **builder** — `make build-builder` (~120 min). Or pull: `docker pull dogkeeper886/vllm37-builder:latest && docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest`.
 
-# One-time: get the builder (prefer pull over rebuild)
-docker pull dogkeeper886/vllm37-builder:latest
-docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest
-# OR: make build-builder  (~120 min)
+`make build-local JOBS=8` sets parallelism on the command line; `JOBS` in `docker/k80/.env` sets the default.
 
-# Iterate:
-make build-local          # ~10 min incremental
-make build-local JOBS=8   # override parallelism via .env
-```
-
-## Key build flags (already set in Dockerfiles)
-- `TORCH_CUDA_ARCH_LIST="3.7"` — K80 compute capability
-- `VLLM_BUILD_LEGACY_CUDA=1` — skip CUTLASS kernels (require sm_70+)
-- `--no-deps` on `pip install .` — prevents PyTorch 2.7 from overwriting 2.0.1
+## When to rebuild what
+- `csrc/`, `setup.py`, `vllm/` → `setup.sh vllm` (host) or `make build-local`
+- `docker/k80/requirements.txt` or `constraints.txt` → `setup.sh deps vllm` or `make build-local`
+- `tools/k80-host/setup.sh` toolchain stage, `docker/k80/builder/Dockerfile` → builder
 
 ## Outputs
-- `vllm37-builder:latest` — base image with toolchain
-- `vllm37-local:latest` — runtime image (from local source)
+- `vllm37-builder:latest` — builder image (venv at `/opt/venv`)
+- `vllm37-local:latest` — runtime image, labelled with the source commit
+- Host: `~/opt/k80` (Python, cuDNN, wheels), `~/.venvs/vllm37`
 
 ## Related
-- `/ci` — trigger the build remotely on the self-hosted runner
-- `docker/k80/README.md` — architecture and limitations
+- `/ci` — build and smoke-test on the self-hosted runner
 - `docker/k80/Makefile` — all build targets

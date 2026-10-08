@@ -12,8 +12,8 @@ name: K80 Phase 2 Context-Length Stress
 #   3. Wall is in framework rather than kernel (e.g., hardcoded buffer) →
 #      fix is a vLLM patch, not a new attention backend.
 #
-# TP=1 only — pre-authorized by the saved hardware-risky-ops rule. Multi-die
-# would shift to off-hours-only.
+# TP=1 only. The default model must support the longest swept context:
+# Qwen/Qwen3-0.6B has max_position_embeddings 40960.
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ on:
       model:
         description: "Model to serve"
         required: false
-        default: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        default: "Qwen/Qwen3-0.6B"
         type: string
       gpu_mem_util:
         description: "GPU memory utilization (vLLM default 0.85)"
@@ -38,6 +38,11 @@ on:
         required: false
         default: "0.75"
         type: string
+      builder_image:
+        description: "Builder image, used only if the runtime image must be rebuilt"
+        required: false
+        default: "vllm37-builder:latest"
+        type: string
 
 concurrency:
   group: k80-hardware
@@ -47,9 +52,12 @@ jobs:
   stress:
     name: Context-length sweep
     runs-on: [self-hosted, vllm]
+    # Up to 4 lengths x (10 min boot + 10 min request) plus an image rebuild.
+    timeout-minutes: 120
     env:
       TP_SIZE: "1"
-      MODEL: ${{ inputs.model || 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' }}
+      MODEL: ${{ inputs.model || 'Qwen/Qwen3-0.6B' }}
+      BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
       GPU_MEM_UTIL: ${{ inputs.gpu_mem_util || '0.85' }}
       TARGET_FILL: ${{ inputs.target_fill || '0.75' }}
       VLLM_K80_TRACE: "1"
@@ -63,27 +71,7 @@ jobs:
 
       - name: Ensure runtime image matches branch SHA
         working-directory: docker/k80
-        env:
-          BRANCH_SHA: ${{ github.sha }}
-        run: |
-          # Mirror of k80-runtime.yml's image-rebuild-on-SHA-drift logic so
-          # this workflow is independently reproducible against branch state.
-          IMAGE_SHA=$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-            vllm37-local:latest 2>/dev/null || echo "")
-          if [ "$IMAGE_SHA" = "$BRANCH_SHA" ]; then
-            echo "vllm37-local:latest already at branch SHA ($BRANCH_SHA); reusing image."
-            exit 0
-          fi
-          if [ -z "$IMAGE_SHA" ]; then
-            echo "Runtime image missing or has no revision label; building from current source."
-          else
-            echo "Runtime image is at $IMAGE_SHA but branch is $BRANCH_SHA; rebuilding."
-          fi
-          if ! docker image inspect vllm37-builder:latest >/dev/null 2>&1; then
-            echo "::error::vllm37-builder:latest not found. Run k80-build.yml or pull dogkeeper886/vllm37-builder."
-            exit 1
-          fi
-          make build-local
+        run: ci/ensure-runtime.sh "$BUILDER_IMAGE"
 
       - name: Prepare log directory
         run: |
@@ -125,22 +113,12 @@ jobs:
             GPU_MEM_UTIL=$GPU_MEM_UTIL \
               docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d 2>&1 | tee -a "$ITER_LOG"
 
-            # Wait for ready, max 10 min.
-            READY=0; STATE="unknown"
-            for i in $(seq 1 120); do
-              CID=$(docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -q vllm 2>/dev/null)
-              if [ -n "$CID" ]; then
-                STATE=$(docker inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "missing")
-                if [ "$STATE" != "running" ]; then
-                  break
-                fi
-              fi
-              if curl -fsS --max-time 3 http://localhost:8000/v1/models >/dev/null 2>&1; then
-                READY=1
-                break
-              fi
-              sleep 5
-            done
+            # Wait for ready, max 10 min; fails fast if the container exits.
+            READY=0
+            WAIT_MSG=$(ci/wait-ready.sh 600) && READY=1
+            echo "$WAIT_MSG"
+            STATE=$(sed -n 's/^Container state=\([a-z]*\).*/\1/p' <<<"$WAIT_MSG")
+            STATE=${STATE:-unknown}
             BOOT_SECS=$(( $(date +%s) - BOOT_START ))
 
             if [ "$READY" != "1" ]; then

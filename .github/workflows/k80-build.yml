@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      builder_image:
+        description: "Builder image to build on (default pulls dogkeeper886/vllm37-builder when missing)"
+        required: false
+        default: "vllm37-builder:latest"
+        type: string
   workflow_call:
     inputs:
       no_cache:
@@ -23,6 +28,10 @@ on:
         required: false
         default: false
         type: boolean
+      builder_image:
+        required: false
+        default: "vllm37-builder:latest"
+        type: string
     outputs:
       result:
         description: "Build result"
@@ -41,8 +50,7 @@ jobs:
     # covers the rare rebuild_builder=true full builder rebuild (~120 min).
     timeout-minutes: ${{ inputs.rebuild_builder && 180 || 60 }}
     env:
-      BUILDER_IMAGE: vllm37-builder
-      BUILDER_SOURCE: dogkeeper886/vllm37-builder:latest
+      BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
       RUNTIME_LOCAL: vllm37-local
     outputs:
       result: ${{ steps.build-local.outcome }}
@@ -52,17 +60,13 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Ensure builder image exists
+        working-directory: docker/k80
         run: |
           if [ "${{ inputs.rebuild_builder }}" = "true" ]; then
             echo "rebuild_builder=true — building $BUILDER_IMAGE from source"
-            cd docker/k80
-            make build-builder
-          elif ! docker image inspect "$BUILDER_IMAGE:latest" >/dev/null 2>&1; then
-            echo "Builder image not found locally. Pulling $BUILDER_SOURCE..."
-            docker pull "$BUILDER_SOURCE"
-            docker tag "$BUILDER_SOURCE" "$BUILDER_IMAGE:latest"
+            make build-builder BUILDER_IMAGE="$BUILDER_IMAGE"
           else
-            echo "Builder image $BUILDER_IMAGE:latest already present — skipping."
+            ci/ensure-builder.sh "$BUILDER_IMAGE"
           fi
 
       - name: Build runtime image (local source)
@@ -70,9 +74,9 @@ jobs:
         working-directory: docker/k80
         run: |
           if [ "${{ inputs.no_cache }}" = "true" ]; then
-            make build-local-no-cache
+            make build-local-no-cache BUILDER_IMAGE="$BUILDER_IMAGE"
           else
-            make build-local
+            make build-local BUILDER_IMAGE="$BUILDER_IMAGE"
           fi
 
       - name: Report image size

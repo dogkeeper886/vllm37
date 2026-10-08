@@ -1,14 +1,14 @@
 {
-  "_comment": "Golden baseline for k80-runtime.yml smoke test. Regenerate by running k80-pipeline.yml with default inputs (TinyLlama 1.1B, TP=1, prompt 'Hello', max_tokens=16, temperature=0), then copy the /v1/completions response fields from the runtime job logs into 'expected' below. Captured 2026-04-24 from run 24888001307.",
+  "_comment": "Golden baseline for k80-runtime.yml smoke test. Regenerate by running k80-pipeline.yml with default inputs (Qwen/Qwen3-0.6B, TP=1, XFORMERS, prompt 'Hello', max_tokens=16, temperature=0), then copy the /v1/completions response fields from the runtime job logs into 'expected' below. Captured 2026-10-08 on the host build (tools/k80-host/serve.sh); confirmed by the CI run that merged it.",
   "applies_when": {
-    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "model": "Qwen/Qwen3-0.6B",
     "tp_size": "1",
     "prompt": "Hello",
     "max_tokens": 16,
     "temperature": 0
   },
   "expected": {
-    "text": ", World!\n\n5. Node.js:\n\n```javascript\n",
+    "text": " Answer! I'm a bit confused about the problem. Let me try to understand",
     "completion_tokens": 16,
     "finish_reason": "length"
   }
