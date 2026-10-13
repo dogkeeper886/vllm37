@@ -1,114 +1,47 @@
 /**
- * The only code that talks to the server under test.
+ * The only code that talks to the server under test, through the OpenAI client.
  * Takes the place of ollama37's cicd/tests/lib/ollama.ts.
  *
- *   serve({ dtype: 'half' })
- *     └─ docker/k80/container-up.sh with the first row of the use-case table,
- *        changed by what the option names
- *
- *   generate('2 calls', 'speech-rewrite', { calls: 2 })
+ *   generate('calls=2', 'speech-rewrite', { calls: 2 })
  *     └─ prompts.yaml['speech-rewrite'] → text, options, judge question
- *          └─ /v1/chat/completions, streamed → reply, prefill and decode speed
+ *          └─ chat.completions.create, streamed → reply, prefill and decode speed
  *               └─ check(reply)
  *                    └─ recorded for the judge, who runs after the GPU is back
  *                         └─ Result { reply, check, judge, pass }
  *
- * `generate` and `modelTest` are the only exports that return model text, and
- * they only run inside runTest, so every reply is checked and every reply is
- * judged. `serve` and `serverInfo` produce no model text.
+ * `generate` is the only export that returns model text, and it only runs inside
+ * runTest, so every reply is checked and recorded for the judge. Starting and
+ * stopping the server is not done here: that is docker/k80/ci/service-start.sh
+ * and service-stop.sh.
  */
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import http from 'node:http';
-import { basename, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import OpenAI from 'openai';
 import { check, type Reply } from './check.js';
-import { serverVram } from './gpu.js';
 import { prompt } from './prompts.js';
-import { arg, assertInRun, beforeRestore, heldFixed, record, type Result } from './run.js';
+import { assertInRun, record, type Result } from './run.js';
 
 export const HOST = process.env.VLLM37_HOST ?? 'http://localhost:8000';
-const CONTAINER = process.env.VLLM37_CONTAINER || 'vllm37';
-/** docker/k80, where container-up.sh and container-down.sh live. */
-const K80 = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-/** Tokens per KV cache block (vLLM's default --block-size). */
-const BLOCK_TOKENS = 16;
-/** A staggered call is sent once the call before it has streamed this many tokens. */
-const STAGGER_AFTER = 20;
 
-/** What the server is started with. */
-export interface Settings {
+// No retries: a call sent twice would be timed twice and would change how many
+// calls the server holds at once.
+const client = new OpenAI({ baseURL: `${HOST}/v1`, apiKey: 'none', maxRetries: 0, timeout: 1_200_000 });
+
+/** What the server says it serves. */
+export interface Served {
   model: string;
-  dtype: 'float32' | 'half';
-  /** Tensor parallel size: 1, or 2 for both dies of one board. Never more. */
-  dies: 1 | 2;
-  /** Context length. One value for every test, so only the option under test differs. */
+  /** Context length in tokens; 0 when the server does not report one. */
   maxModelLen: number;
 }
 
-/** The first row of the use-case table. A test changes one field of it per option. */
-export const FIRST_ROW: Settings = { model: 'Qwen/Qwen3-0.6B', dtype: 'float32', dies: 1, maxModelLen: 12288 };
+let serving: Promise<Served> | undefined;
 
-let serving: Settings | undefined;
-let started = 0;
-
-/** The container's stdout and stderr; docker logs replays them on its own two streams. */
-function containerLog(): string {
-  const r = spawnSync('docker', ['logs', CONTAINER], { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
-  return `${r.stdout ?? ''}${r.stderr ?? ''}`;
-}
-
-/** Keep the server's log beside the report before its container is removed. */
-function keepLog(): void {
-  if (!serving) return;
-  const report = resolve(arg('output') ?? 'results/report.json');
-  mkdirSync(dirname(report), { recursive: true });
-  writeFileSync(resolve(dirname(report), `${basename(report, '.json')}-server-${started}.log`), containerLog());
-}
-beforeRestore(keepLog);
-
-/** The scripts' output goes to stderr: stdout is the report. */
-function script(name: string, args: string[], env: NodeJS.ProcessEnv = process.env): void {
-  const r = spawnSync('bash', [resolve(K80, name), ...args], { stdio: ['ignore', 2, 2], env });
-  if (r.status !== 0) throw new Error(`${name} exited ${r.status}`);
-}
-
-/**
- * Serve the first row of the table with `change` applied. A server already up
- * with the same settings is kept; any other is replaced. The GPU hand-over is
- * runTest's: this only starts and stops the container.
- */
-export async function serve(change: Partial<Settings> = {}): Promise<Settings> {
-  assertInRun();
-  const s: Settings = { ...FIRST_ROW, ...change };
-  if (serving && JSON.stringify(serving) === JSON.stringify(s)) return s;
-  if (serving) {
-    keepLog();
-    script('container-down.sh', []);
-  }
-  serving = undefined;
-  script('container-up.sh', ['600'], {
-    ...process.env,
-    COMPOSE_FILE: process.env.COMPOSE_FILE ?? 'docker-compose.yml:docker-compose.ci.yml',
-    MODEL: s.model,
-    DTYPE: s.dtype,
-    TP_SIZE: String(s.dies),
-    MAX_MODEL_LEN: String(s.maxModelLen),
-    // Two dies have hung this machine before: keep the tensor-parallel start-up trace.
-    VLLM_K80_TRACE: process.env.VLLM_K80_TRACE ?? (s.dies > 1 ? '1' : '0'),
+/** The model the server serves and its context length, asked once per run. */
+export function served(): Promise<Served> {
+  serving ??= client.models.list().then(({ data }) => {
+    const m = data[0] as (OpenAI.Model & { max_model_len?: number }) | undefined;
+    if (!m) throw new Error(`${HOST} serves no model`);
+    return { model: m.id, maxModelLen: m.max_model_len ?? 0 };
   });
-  serving = s;
-  started++;
-  heldFixed(`${s.model}, ${s.dtype}, ${s.dies} die(s), ${s.maxModelLen}-token context`);
-  return s;
-}
-
-/** Weights and KV cache size as the server logged them at start. Per die when it runs on two. */
-export function serverInfo(): { weightsGib: number; kvTokens: number } {
-  const log = containerLog();
-  const weights = log.match(/model weights take ([\d.]+)\s*GiB/);
-  const blocks = log.match(/# cuda blocks: (\d+)/);
-  return { weightsGib: weights ? Number(weights[1]) : 0, kvTokens: blocks ? Number(blocks[1]) * BLOCK_TOKENS : 0 };
+  return serving;
 }
 
 const round = (x: number, digits = 2): number => (Number.isFinite(x) ? +x.toFixed(digits) : 0);
@@ -141,8 +74,9 @@ interface Timed {
  * One streamed chat completion. `onToken` is told how many tokens have arrived,
  * so a staggered call can start part-way through this one.
  */
-function call(model: string, text: string, options: Record<string, unknown>, onToken?: (n: number) => void): Promise<Timed> {
-  const body = JSON.stringify({
+async function call(model: string, text: string, options: Record<string, unknown>, onToken?: (n: number) => void): Promise<Timed> {
+  const sent = performance.now();
+  const stream = await client.chat.completions.create({
     model,
     messages: [{ role: 'user', content: text }],
     max_tokens: Number(options.num_predict ?? 100),
@@ -151,67 +85,41 @@ function call(model: string, text: string, options: Record<string, unknown>, onT
     stream: true,
     stream_options: { include_usage: true },
   });
-  return new Promise<Timed>((done, fail) => {
-    const sent = performance.now();
-    let first = 0, last = 0, tokens = 0, pending = '', response = '', thinking = '', doneReason = '';
-    let usage: { prompt_tokens: number; completion_tokens: number } | undefined;
-    const req = http.request(new URL('/v1/chat/completions', HOST), {
-      method: 'POST',
-      // A connection of its own: node keeps sockets alive, and one kept from a
-      // server this run has since replaced hangs up on the next request.
-      agent: false,
-      headers: { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
-    }, (res) => {
-      res.setEncoding('utf-8');
-      if (res.statusCode !== 200) {
-        let error = '';
-        res.on('data', (c: string) => (error += c));
-        res.on('end', () => fail(new Error(`HTTP ${res.statusCode}: ${error.slice(0, 300)}`)));
-        return;
-      }
-      res.on('data', (chunk: string) => {
-        pending += chunk;
-        const lines = pending.split('\n');
-        pending = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-          const event = JSON.parse(line.slice(6));
-          if (event.usage) usage = event.usage;
-          const choice = event.choices?.[0];
-          if (!choice) continue;
-          if (choice.finish_reason) doneReason = choice.finish_reason;
-          const content: string = choice.delta?.content ?? '';
-          const reasoning: string = choice.delta?.reasoning_content ?? '';
-          if (!content && !reasoning) continue;
-          const now = performance.now();
-          if (!first) first = now;
-          last = now;
-          response += content;
-          thinking += reasoning;
-          onToken?.(++tokens);
-        }
-      });
-      res.on('error', fail);
-      res.on('end', () => {
-        if (!usage) return fail(new Error('the stream ended without a usage record'));
-        const split = splitThinking(response);
-        done({
-          reply: { response: split.response.trim(), thinking: (thinking + split.thinking).trim(), doneReason, evalCount: usage.completion_tokens },
-          inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens, sent, first: first || performance.now(), last: last || performance.now(),
-        });
-      });
-    });
-    req.setTimeout(1_200_000, () => req.destroy(new Error('no response in 1200s')));
-    req.on('error', fail);
-    req.end(body);
-  });
+  let first = 0, last = 0, tokens = 0, response = '', thinking = '', doneReason = '';
+  let usage: OpenAI.CompletionUsage | undefined;
+  for await (const chunk of stream) {
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices[0];
+    if (!choice) continue;
+    if (choice.finish_reason) doneReason = choice.finish_reason;
+    const content = choice.delta?.content ?? '';
+    // vLLM's field for reasoning a parser has split off; not in the OpenAI types.
+    const reasoning = (choice.delta as { reasoning_content?: string } | undefined)?.reasoning_content ?? '';
+    if (!content && !reasoning) continue;
+    const now = performance.now();
+    if (!first) first = now;
+    last = now;
+    response += content;
+    thinking += reasoning;
+    onToken?.(++tokens);
+  }
+  if (!usage) throw new Error('the stream ended without a usage record');
+  const split = splitThinking(response);
+  const end = performance.now();
+  return {
+    reply: { response: split.response.trim(), thinking: (thinking + split.thinking).trim(), doneReason, evalCount: usage.completion_tokens },
+    inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens, sent, first: first || end, last: last || end,
+  };
 }
 
 export interface GenerateOptions {
   /** How many calls send the prompt. Default 1. */
   calls?: number;
-  /** `together`: all at once. `staggered`: each once the one before has streamed some tokens. */
-  arrival?: 'together' | 'staggered';
+  /**
+   * Tokens a call has streamed before the next one is sent. 0, the default,
+   * sends all calls together.
+   */
+  stagger?: number;
 }
 
 /**
@@ -220,24 +128,23 @@ export interface GenerateOptions {
  */
 export async function generate(option: string, name: string, opts: GenerateOptions = {}): Promise<Result[]> {
   assertInRun();
-  if (!serving) throw new Error('generate() needs a server: call serve() first');
-  const { model } = serving;
+  const { model } = await served();
   const p = prompt(name);
   const count = opts.calls ?? 1;
-  const staggered = opts.arrival === 'staggered';
+  const stagger = opts.stagger ?? 0;
 
   const running: Promise<Timed>[] = [];
-  /** release[i] lets call i+1 go; call i fires it at its STAGGER_AFTER-th token. */
+  /** release[i] lets call i+1 go; call i fires it at its `stagger`-th token. */
   const release: (() => void)[] = [];
   for (let i = 0; i < count; i++) {
-    if (staggered && i > 0) {
+    if (stagger > 0 && i > 0) {
       // Wait until the call before this one is decoding, or has ended early.
       await new Promise<void>((go) => {
         release[i - 1] = go;
         running[i - 1].then(() => go(), () => go());
       });
     }
-    running.push(call(model, p.text, p.options, (n) => { if (n === STAGGER_AFTER) release[i]?.(); }));
+    running.push(call(model, p.text, p.options, (n) => { if (n === stagger) release[i]?.(); }));
   }
   const timed = await Promise.all(running);
 
@@ -262,25 +169,10 @@ export async function generate(option: string, name: string, opts: GenerateOptio
         prefillTps: round(t.inTokens / ((t.first - t.sent) / 1000)),
         decodeTps: round(Math.max(t.outTokens - 1, 0) / ((t.last - t.first) / 1000)),
         firstTokenS: round((t.first - t.sent) / 1000),
-        // A test about calls reports the group's rate on every row, the 1-call row included.
-        ...(opts.calls !== undefined ? { call: i + 1, totalDecodeTps, ...(staggered && i > 0 ? { sentAfterTokens: STAGGER_AFTER } : {}) } : {}),
+        totalDecodeTps,
+        ...(count > 1 ? { call: i + 1 } : {}),
+        ...(stagger > 0 && i > 0 ? { sentAfterTokens: stagger } : {}),
       },
     }),
   );
-}
-
-/**
- * The model test, as ollama37's models.ts: does the server just started load the
- * model and answer in language? Its row also carries what the server holds:
- * weights, KV cache size and VRAM per die.
- */
-export async function modelTest(option: string): Promise<Result> {
-  const [r] = await generate(option, 'short-answer');
-  const info = serverInfo();
-  const vram = serverVram();
-  r.checks.resident = { pass: vram.totalMib > 0, reason: `${vram.totalMib} MiB across ${vram.dies} die(s)` };
-  r.metrics.weightsGib = info.weightsGib;
-  r.metrics.kvTokens = info.kvTokens;
-  r.metrics.vramMib = `${vram.totalMib}/${vram.dies}die`;
-  return r;
 }
