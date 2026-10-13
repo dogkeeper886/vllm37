@@ -27,7 +27,7 @@ cd docker/k80
 docker pull dogkeeper886/vllm37-builder:latest
 docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest
 make build-local          # runtime image from this checkout
-make run && make logs     # serves on port 8000, TP=1
+make run                  # starts container vllm37, returns when port 8000 answers
 ```
 
 ```bash
@@ -64,7 +64,7 @@ One script, [`tools/k80-host/setup.sh`](tools/k80-host/setup.sh), builds the sta
 
 | Build | Command | Use for |
 |---|---|---|
-| Host | `tools/k80-host/setup.sh`, then `tools/k80-host/serve.sh` | Editing on the K80 machine; Python edits apply without a rebuild |
+| Host | `tools/k80-host/setup.sh`, then `tools/k80-host/serve.sh` or the `vllm37` user service | Editing on the K80 machine; Python edits apply without a rebuild |
 | Builder image | `make -C docker/k80 build-builder` (~2 h) | The `toolchain` stage, once per toolchain change |
 | Runtime image | `make -C docker/k80 build-local` | CI and clean builds; a source-only change rebuilds in ~4 min |
 
@@ -81,6 +81,8 @@ gh workflow run k80-context-stress.yml --ref <branch>                    # conte
 ```
 
 The smoke test checks the selected attention backend and compares `/v1/completions` with [`docker/k80/ci/golden.json`](docker/k80/ci/golden.json).
+
+The GPU workflows take the K80s for the test: [`docker/k80/ci/gpu-yield.sh`](docker/k80/ci/gpu-yield.sh) stops the `vllm37` and `ollama` user services if they are running, and [`gpu-restore.sh`](docker/k80/ci/gpu-restore.sh) starts the ones it stopped once the test ends.
 
 ## Hardware safety
 

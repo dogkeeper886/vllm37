@@ -13,9 +13,9 @@ docker tag dogkeeper886/vllm37-builder:latest vllm37-builder:latest
 # make build-builder
 
 make build-local     # runtime image from this checkout
-make run             # docker compose up -d
+make run             # container-up.sh: start container vllm37, wait until it serves
 make logs
-make stop
+make stop            # container-down.sh
 ```
 
 `make build-local` orders the layers from least to most often changed (`deps` → `xformers` → `vllm`), so a source-only change rebuilds just the `vllm` stage (~4 min with `JOBS=8`). The image is labelled with the source commit (`org.opencontainers.image.revision`); CI rebuilds when the label differs from the branch.
@@ -115,10 +115,13 @@ docker/k80/
 ├── runtime/Dockerfile.local  # setup.sh deps, xformers, vllm; engine env; entrypoint
 ├── requirements.txt          # Python packages (common.txt + Ray)
 ├── constraints.txt           # torch==2.4.1, transformers<5, numpy<2, opencv<4.12
-├── docker-compose.yml        # GPUs, ports, cache and log mounts, per-run settings
+├── docker-compose.yml        # container vllm37: GPUs, ports, cache and log mounts, per-run settings
+├── docker-compose.ci.yml     # CI override: no restart, so a crash stays visible
+├── container-up.sh           # start the container and wait until it serves
+├── container-down.sh         # stop and remove the container
 ├── Makefile                  # build-builder, build-local, run, stop, logs, verify-*-patches
 ├── .env.example              # settings template
-├── ci/                       # golden.json and scripts used by the k80-* workflows
+├── ci/                       # golden.json, image checks, gpu-yield.sh and gpu-restore.sh
 ├── xformers-build/           # xformers build script and GPU kernel test
 ├── xformers-patches/         # sm_37 patches for xformers v0.0.23
 ├── cutlass-patches/          # Sm37 arch trait for CUTLASS
@@ -128,3 +131,5 @@ docker/k80/
 ## CI
 
 The `k80-*` workflows in `.github/workflows/` build and test these images on the self-hosted runner; see the CI section of the [root README](../../README.md#ci). `k80-pipeline.yml` calls `k80-build.yml` and `k80-runtime.yml`, so their runs appear under "K80 Full Pipeline".
+
+The container serves on port 8000, the same port as the host service `vllm37`, so only one of them runs at a time. Before a test, `ci/gpu-yield.sh` stops the `vllm37` and `ollama` user services if they are running and records their names; `ci/gpu-restore.sh` removes the container and starts the recorded services.

@@ -1,6 +1,6 @@
 # CI override for docker-compose.yml
 # Use with:
-#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.ci.yml ./container-up.sh
 #
 # Disables restart-on-crash so that a failed container stays `exited` and
 # can be detected by `docker inspect .State.Status`. Without this, the
