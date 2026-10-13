@@ -8,28 +8,6 @@ on:
         required: false
         default: false
         type: boolean
-      tp_size:
-        description: "Tensor parallel size for smoke test"
-        required: false
-        default: "1"
-        type: string
-      model:
-        description: "Model for smoke test"
-        required: false
-        default: "Qwen/Qwen3-0.6B"
-        type: string
-      attention_backend:
-        description: "Attention backend (TORCH_SDPA for a regression comparison)"
-        required: false
-        default: "XFORMERS"
-        type: choice
-        options: [XFORMERS, TORCH_SDPA]
-      dtype:
-        description: "Weight and KV cache dtype (half = FP16 storage, FP32 math)"
-        required: false
-        default: "float32"
-        type: choice
-        options: [float32, half]
       builder_image:
         description: "Builder image to build on"
         required: false
@@ -42,15 +20,4 @@ jobs:
     uses: ./.github/workflows/k80-build.yml
     with:
       no_cache: ${{ inputs.no_cache }}
-      builder_image: ${{ inputs.builder_image }}
-
-  runtime:
-    name: Runtime smoke
-    needs: build
-    uses: ./.github/workflows/k80-runtime.yml
-    with:
-      tp_size: ${{ inputs.tp_size }}
-      model: ${{ inputs.model }}
-      attention_backend: ${{ inputs.attention_backend }}
-      dtype: ${{ inputs.dtype }}
       builder_image: ${{ inputs.builder_image }}

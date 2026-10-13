@@ -1,0 +1,4 @@
+node_modules/
+results/
+# The repository ignores every lib/ folder (a Python build rule); this one is source.
+!lib/

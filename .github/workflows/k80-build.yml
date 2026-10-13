@@ -79,12 +79,28 @@ jobs:
             make build-local BUILDER_IMAGE="$BUILDER_IMAGE"
           fi
 
-      - name: Report image size
+      - name: Report the image
         if: always()
         run: |
-          docker image inspect "$RUNTIME_LOCAL:latest" \
-            --format 'Image: {{.RepoTags}}  Size: {{.Size}} bytes' || \
-            echo "Runtime image not available."
+          # The run summary: which image this run left on the runner.
+          {
+            echo "## Build"
+            echo ""
+            if docker image inspect "$RUNTIME_LOCAL:latest" >/dev/null 2>&1; then
+              REV=$(docker image inspect "$RUNTIME_LOCAL:latest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+              SIZE=$(docker image inspect "$RUNTIME_LOCAL:latest" --format '{{.Size}}')
+              echo "| | |"
+              echo "|---|---|"
+              echo "| Image | \`$RUNTIME_LOCAL:latest\` |"
+              echo "| Built from commit | \`${REV:-unknown}\` |"
+              echo "| This run's commit | \`$GITHUB_SHA\` |"
+              echo "| Size | $(awk -v b="$SIZE" 'BEGIN { printf "%.2f GiB", b / 1073741824 }') |"
+              echo "| Builder image | \`$BUILDER_IMAGE\` |"
+              echo "| Result | ${{ steps.build-local.outcome }} |"
+            else
+              echo "No \`$RUNTIME_LOCAL:latest\` image on the runner; the build step ended with: ${{ steps.build-local.outcome }}."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Prune dangling images
         if: always()

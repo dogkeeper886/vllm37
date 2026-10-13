@@ -1,0 +1,11 @@
+name: Setup tests
+description: >
+  Node and the dependencies of docker/k80/ci/tests, so a job can run the test scripts.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+      with:
+        node-version: "20"
+    - shell: bash
+      run: cd docker/k80/ci/tests && npm ci
