@@ -1,7 +1,8 @@
 name: K80 Host Info
 
-# Pure read-only status query of the self-hosted K80 runner.
-# No GPU compute, no docker, no TP. Safe at any time.
+# What the self-hosted K80 runner is: its GPUs, driver, CUDA toolkit and OS.
+# Read-only: no GPU compute, no docker, no tensor parallelism. Safe at any time.
+# The run summary is two tables: the host, then the toolchain.
 
 on:
   workflow_dispatch:
@@ -16,26 +17,23 @@ jobs:
     runs-on: [self-hosted, vllm]
 
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/identify-host
+
+      - name: Toolchain
+        run: |
+          NVCC=$( (nvcc --version 2>/dev/null || /usr/local/cuda/bin/nvcc --version 2>/dev/null) | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
+          {
+            echo "### Toolchain"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| nvcc | ${NVCC:-not found} |"
+            echo "| CUDA installs | $(ls -d /usr/local/cuda* 2>/dev/null | tr '\n' ' ') |"
+            echo "| Docker | $(docker --version 2>/dev/null || echo 'not found') |"
+            echo "| OS | $(. /etc/os-release && echo "$PRETTY_NAME") |"
+            echo "| Kernel | $(uname -r) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: nvidia-smi
-        run: |
-          echo "=== nvidia-smi ==="
-          nvidia-smi || true
-          echo ""
-          echo "=== nvidia-smi structured query ==="
-          nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv || true
-
-      - name: nvcc / CUDA toolkit
-        run: |
-          echo "=== nvcc --version ==="
-          nvcc --version 2>&1 || echo "(nvcc not on PATH)"
-          echo ""
-          echo "=== /usr/local/cuda symlink ==="
-          ls -ld /usr/local/cuda* 2>/dev/null || true
-
-      - name: Host OS + kernel
-        run: |
-          echo "=== /etc/os-release ==="
-          cat /etc/os-release || true
-          echo ""
-          echo "=== uname -a ==="
-          uname -a
+        run: nvidia-smi || true

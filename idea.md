@@ -1,6 +1,7 @@
 # Model targets for the K80 fork
 
-**Format for now: HF safetensors (BF16), served as FP32** with `--dtype float32`.
+**Format for now: HF safetensors (BF16), served as FP32** with `--dtype float32`, or
+stored as FP16 with `--dtype half` (half the memory; README "FP16 storage").
 Weight-only int4 checkpoints (GPTQ, AWQ, compressed-tensors w4a16, GGUF Q4) wait for
 #73 (load and repack to a K80 int4 layout) and #74 (fused K80 int4 kernel).
 Why, with measurements: `docs/port/model-family-requirements.md` Part 9.
@@ -30,6 +31,7 @@ models into three tiers:
 | 4 dies (TP=4) | ~39 GB | ⚠ power-risky, unvalidated |
 
 KV cache is FP32: bytes per token = layers × 2 × kv_heads × head_dim × 4.
+With `--dtype half` the weights and the KV cache both take half the bytes below.
 
 ## Priority: safetensors models (FP32)
 
@@ -54,7 +56,7 @@ KV cache is FP32: bytes per token = layers × 2 × kv_heads × head_dim × 4.
 | ✗ | LFM2.5 1.2B / 2.6B | `LiquidAI/LFM2.5-*` | 2026-01/07 | 1.17–2.7B | 128K | 4.7–10.8 GB | — | — | C — conv layers |
 | ✗ | gpt-oss 20B | `openai/gpt-oss-20b` | 2025-08 | 20.9B | — | 84 GB | — | — | C — MXFP4 MoE |
 
-Tier A means the architecture is registered. Only Qwen3-0.6B has been loaded on the K80; the others are untested.
+Tier A means the architecture is registered. Qwen3-0.6B (FP32 and FP16) and Granite 4.2 3B (FP16, one die) have been loaded on the K80; the others are untested.
 All repos above are ungated except Gemma (license click-through).
 
 ## Later: GGUF sizes
@@ -79,7 +81,7 @@ than FP32 cuBLAS for decode (Part 9). vLLM loads single-file GGUF only.
 
 | Format | Quant types | K80 status |
 |---|---|---|
-| HF safetensors (BF16/FP16) | none; upcast to FP32 | **works today** (tier A) |
+| HF safetensors (BF16/FP16) | none; upcast to FP32, or stored as FP16 with FP32 math | **works today** (tier A) |
 | GGUF | Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q4_0, IQ4_XS | blocked: kernels need `__dp4a` / half math; Q4 planned via #73, #74 |
 | GPTQ / AWQ / compressed-tensors w4a16 | int4 | blocked: kernels need half2 math, tensor cores, `cp.async`; planned via #73, #74 |
 | bitsandbytes | nf4, int8 | blocked: sm_60+, no backport |

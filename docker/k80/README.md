@@ -29,7 +29,7 @@ make stop            # container-down.sh
 | `JOBS` | 4 | Parallel compile jobs for `make build-*` |
 | `MODEL` | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | Model to serve |
 | `TP_SIZE` | 1 | Tensor parallel size: 1 or 2 (see Safety) |
-| `DTYPE` | `float32` | Weight and compute dtype |
+| `DTYPE` | `float32` | Weight and KV cache dtype: `float32` or `half` (FP16 storage, FP32 math) |
 | `MAX_MODEL_LEN` | 2048 | Context length |
 | `GPU_MEM_UTIL` | 0.85 | Fraction of each die's memory vLLM may use |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | `XFORMERS` or `TORCH_SDPA` |

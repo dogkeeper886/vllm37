@@ -14,7 +14,7 @@ vllm37 swaps each part of vLLM that needs a newer GPU for one the K80 can execut
 | PyTorch 2.x wheels (no Kepler build) | PyTorch 2.4.1 built from source for `sm_37`, cuDNN 8.7 for CUDA 11 |
 | FlashAttention, FlashInfer or Triton attention | xformers v0.0.23 `cutlassF` kernels, patched for `sm_37` |
 | V1 engine, `torch.compile`, CUDA graphs | V0 engine, eager mode (`--enforce-eager`) |
-| BF16 / FP16 math | FP32 (`--dtype float32`) |
+| BF16 / FP16 math | FP32 math; weights and KV cache stored as FP32 (`--dtype float32`) or FP16 (`--dtype half`) |
 
 The fork builds on vLLM ~v0.10 (August 2025), Python 3.10 and GCC 10. [`docs/port/model-family-requirements.md`](docs/port/model-family-requirements.md) explains, with file and line evidence, why each upstream path fails on `sm_37`.
 
@@ -46,10 +46,31 @@ Measured on 2× Tesla K80 (4 GPU dies, 11.4 GiB each):
 | `Qwen/Qwen3-0.6B` | TP=1, XFormers | CI golden output; context up to 16,384 tokens (11,252-token prompt: 22 s prefill) |
 | `Qwen/Qwen3-0.6B` | TP=1, Torch SDPA | Same output as XFormers |
 | `Qwen/Qwen3-0.6B` | TP=1, `--model-impl transformers` | Same output, through transformers' own model code |
+| `Qwen/Qwen3-0.6B` | TP=1, `--dtype half`, XFormers or Torch SDPA | Same output as FP32; see [FP16 storage](#fp16-storage) |
+| `ibm-granite/granite-4.2-3b` | TP=1, `--dtype half` | Fits one die (6.85 GiB of weights); on GPU2, 5,627-token prompt: 47 s prefill, 4.7 tok/s decode |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | TP=1 | Previous CI golden output |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | TP=2 | Worked in earlier testing; not re-run since the 2026-10 build changes |
 
-FP32 weights take 4 bytes per parameter, so one die holds models up to about 2B parameters and one board (TP=2) up to about 4B. [`idea.md`](idea.md) ranks candidate models by size and fit.
+FP32 weights take 4 bytes per parameter, so one die holds models up to about 2B parameters and one board (TP=2) up to about 4B. FP16 storage halves that. [`idea.md`](idea.md) ranks candidate models by size and fit.
+
+### FP16 storage
+
+`--dtype half` (`DTYPE=half`) stores weights and KV cache in 2 bytes per value and computes in FP32. The default stays `float32`, because FP16 is slower once requests overlap. Measured with `Qwen/Qwen3-0.6B` on GPU0 and GPU1, XFormers, host build:
+
+| | FP32 | FP16 |
+|---|---|---|
+| Weights | 2.24 GiB | 1.12 GiB |
+| KV cache at a 16,384-token context | 27,136 tokens | 64,384 tokens |
+| Prefill, 1,407 tokens | 0.98 s | 1.30 s |
+| Prefill, 11,252 tokens | 21.5 s | 24.4 s |
+| Decode after 1,407 tokens | 44.6 tok/s | 63.5 tok/s |
+| Decode after 11,252 tokens | 23.6 tok/s | 32.6 tok/s |
+| 2 requests at once, total | 30.5 tok/s | 22.8 tok/s |
+| 8 requests at once, total | 145.6 tok/s | 89.0 tok/s |
+
+- **Use it** for a model that does not fit in FP32, and for one request at a time.
+- **Board B is slower:** GPU2 and GPU3 ran the same test at about half the speed of GPU0 and GPU1 in both dtypes.
+- **Gemma 3** refuses `half`; serve it in `float32`.
 
 ### Open problems
 
@@ -89,6 +110,7 @@ The GPU workflows take the K80s for the test: [`docker/k80/ci/gpu-yield.sh`](doc
 - **Keep tensor parallelism at 1 or 2.** TP=4 runs both K80 boards from one CPU power cable and has halted this machine.
 - **Leave GPU power limits at their defaults.** Changing them (`nvidia-smi -pl`) has halted this machine.
 - **Keep `NCCL_P2P_DISABLE=1`** for TP > 1. The K80 is PCIe-only; the runtime image and `serve.sh` set it.
+- **Watch die temperature under sustained load.** One die reached 87 °C after a few minutes of back-to-back long prefills; the card slows at 88 °C and shuts down at 93 °C.
 
 ## Project docs
 
