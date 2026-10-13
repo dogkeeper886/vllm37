@@ -1,51 +1,17 @@
 name: "Test: arrival"
 
-# Two calls sent together, then the second sent while the first is decoding.
-# Column "Arrival" of the use-case table (together, staggered); the other columns stay on
-# its first row, except that arrival needs two calls: Qwen/Qwen3-0.6B, float32,
-# 1 die, 2 calls, speech-rewrite.
-# Wiring only: the test is docker/k80/ci/tests/arrival.ts, which takes the GPUs,
-# serves, gives them back, judges every reply and fails on anything unjudged.
-# The run summary is the host, then the test's own table.
+# Two calls sent together, then the second sent once the first has streamed 20
+# tokens: does the server still answer when a call joins a running one?
+# Its own input is stagger, and arrival needs two calls; every other input keeps
+# its default in k80-test.yml.
 
 on:
   workflow_dispatch:
 
-concurrency:
-  group: k80-hardware
-  cancel-in-progress: false
-
 jobs:
   test:
-    name: arrival (together, staggered)
-    runs-on: [self-hosted, vllm]
-    # An image rebuild (~15 min), the server starts, the calls and the judge.
-    timeout-minutes: 60
-    env:
-      # The judge: a model on an ollama server. A repository variable of the same
-      # name overrides either default.
-      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
-      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
-      VLLM_LOG_DIR: /tmp/k80-ci-logs
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-      - uses: ./.github/actions/identify-host
-      - uses: ./.github/actions/setup-tests
-      - name: Ensure runtime image matches branch SHA
-        working-directory: docker/k80
-        run: ci/ensure-runtime.sh
-      - name: Run
-        working-directory: docker/k80/ci/tests
-        run: npx tsx arrival.ts --output results/arrival.json
-      # runTest restores the GPU itself, but a cancelled or timed-out job kills it
-      # first; this gives the cards back whatever happened above.
-      - name: Restore GPU
-        if: always()
-        run: docker/k80/ci/gpu-restore.sh
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: arrival-report
-          path: docker/k80/ci/tests/results/
-          if-no-files-found: warn
+    uses: ./.github/workflows/k80-test.yml
+    with:
+      test: arrival
+      calls: "2"
+      stagger: "0,20"

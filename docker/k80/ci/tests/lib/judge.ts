@@ -1,5 +1,5 @@
 /**
- * The agent judge. Used only by lib/vllm.ts, through lib/run.ts.
+ * The agent judge. Used only by report.ts.
  * From ollama37's cicd/tests/lib/judge.ts; judgeReady() is added.
  *
  * One job: put a question from prompts.yaml to an agent and read back yes or no.

@@ -12,8 +12,8 @@ ARG BUILDER_IMAGE=vllm37-builder
 FROM ${BUILDER_IMAGE}
 
 ARG MAX_JOBS=4
-# Revision of the source this image was built from. k80-runtime.yml reads this
-# label to decide whether to rebuild when the branch moves ahead of the image.
+# Revision of the source this image was built from. docker/k80/ci/runtime.sh
+# reads this label to report which commit a test run serves.
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 
