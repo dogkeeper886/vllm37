@@ -1,16 +1,8 @@
-name: K80 Phase 2 Context-Length Stress
+name: K80 Context-Length Stress
 
-# Story 3.0 (gating measurement) per docs/port/flash-attn-fattn-vec-recon.md.
-# Sweeps --max-model-len with the current Phase 2 stack (XFormers cutlassF
-# backend) and records boot time, prefill latency, prompt token count, and
-# observed KV-cache size for each setting. Three branch outcomes feed the
-# Phase 3 go/no-go:
-#
-#   1. Hits ≥8K cleanly → Phase 3 has no headline prize on K80; close it.
-#   2. Hits a specific wall → Phase 3 targets that wall, not "implement FA
-#      from scratch."
-#   3. Wall is in framework rather than kernel (e.g., hardcoded buffer) →
-#      fix is a vLLM patch, not a new attention backend.
+# Sweeps --max-model-len on the XFormers cutlassF backend and records boot
+# time, prefill latency, prompt token count and observed KV-cache size for
+# each setting.
 #
 # TP=1 only. The default model must support the longest swept context:
 # Qwen/Qwen3-0.6B has max_position_embeddings 40960.
@@ -94,7 +86,7 @@ jobs:
             ITER_LOG="$VLLM_LOG_DIR/iter-L${L}.log"
 
             # Build a prompt of approximately TARGET_FILL * L tokens. Rough
-            # heuristic ~3.5 chars/token for English text — vLLM reports the
+            # heuristic ~4 chars/token for English text — vLLM reports the
             # exact prompt_tokens in the response so the imprecision washes
             # out. We over-shoot slightly and let vLLM reject if too long.
             TARGET_TOKENS=$(awk -v L="$L" -v F="$TARGET_FILL" 'BEGIN { printf "%d", L * F }')

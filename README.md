@@ -53,11 +53,9 @@ FP32 weights take 4 bytes per parameter, so one die holds models up to about 2B 
 
 ### Open problems
 
-Tracked in [#78](https://github.com/dogkeeper886/vllm37/issues/78):
-
 - Quantized checkpoints (GPTQ, AWQ, FP8, GGUF and others): their kernels use instructions the K80 lacks. A K80 int4 kernel is planned in #73 and #74.
-- MoE models: `vllm._moe_C` fails to load (D11).
-- Guided decoding returns unconstrained text (D12).
+- MoE models: `vllm._moe_C` fails to load (#85).
+- Guided decoding returns unconstrained text (#86).
 - Models that mix sliding-window and full attention layers are capped at the window size (Gemma 3 270m/1b: 512 tokens), and attention supports head dimensions up to 256.
 
 ## Build
@@ -96,8 +94,6 @@ The smoke test checks the selected attention backend and compares `/v1/completio
 |---|---|
 | [`docs/port/model-family-requirements.md`](docs/port/model-family-requirements.md) | 14 model families: release formats, code paths, requirements on sm_37; why quantized kernels fail and the int4 workaround |
 | [`idea.md`](idea.md) | Model targets ranked by fit on K80 |
-| [`docs/port/`](docs/port/) | Port studies: CUTLASS, FlashAttention, CUDA 11.4 pins, Kepler vs Maxwell, prior art |
-| [#78](https://github.com/dogkeeper886/vllm37/issues/78) | Cleanup tracking and open runtime problems |
 
 ## Contributing
 

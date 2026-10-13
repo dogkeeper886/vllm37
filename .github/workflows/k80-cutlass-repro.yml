@@ -1,8 +1,8 @@
 name: K80 CUTLASS sm_37 Reproducer
 
-# Story #28 (Phase 1 of epic #12) — compile docker/k80/cutlass-repro/sgemm_sm37.cu
-# inside the K80 builder image, run the resulting binary on a single K80 die,
-# and capture the output as a CI artifact.
+# Compile the reproducers in docker/k80/cutlass-repro/ inside the K80 builder
+# image, run the resulting binaries on a single K80 die, and capture the
+# output as a CI artifact.
 #
 # Single-die TP=1-equivalent compute. No NCCL, no multi-die; compute is
 # bounded to ~1 MB VRAM. Kept as a manual check of the CUTLASS Sm37 patch
@@ -41,8 +41,8 @@ jobs:
           # Mount the cutlass-repro and cutlass-patches dirs into the builder.
           # The build script clones CUTLASS into /tmp/cutlass-sm37-build,
           # applies the patches, and compiles two binaries:
-          #   - sgemm_sm37             (Story #28 — basic correctness)
-          #   - sgemm_sm37_vs_cublas   (Story #29 — vs cuBLAS reference)
+          #   - sgemm_sm37             (basic correctness)
+          #   - sgemm_sm37_vs_cublas   (vs cuBLAS reference)
           docker run --rm \
             -v "${{ github.workspace }}/docker/k80/cutlass-repro:/repro:ro" \
             -v "${{ github.workspace }}/docker/k80/cutlass-patches:/patches:ro" \
@@ -61,9 +61,9 @@ jobs:
       - name: Run sgemm_sm37 on K80 hardware
         id: run_basic
         run: |
-          # Story #28 binary — basic correctness against deterministic input.
-          # `timeout 60` bounds the "no kernel image" hang failure mode flagged
-          # by Story 0.5 §3.7. Binary completes in <1s on this hardware.
+          # Basic correctness against deterministic input.
+          # `timeout 60` bounds the "no kernel image" hang failure mode.
+          # Binary completes in <1s on this hardware.
           # Explicit exit-code preservation; grep is defense-in-depth.
           docker_exit=0
           docker run --rm \
@@ -86,7 +86,7 @@ jobs:
       - name: Run sgemm_sm37_vs_cublas on K80 hardware
         id: run_cublas
         run: |
-          # Story #29 binary — CUTLASS Sm37 vs cuBLAS, multiple sizes,
+          # CUTLASS Sm37 vs cuBLAS, multiple sizes,
           # randomized input, max relative error tolerance check.
           # 5 sizes × ~1s each + cuBLAS init = should complete well inside
           # the 120s timeout. cuBLAS first-run JIT can be slow on K80, so

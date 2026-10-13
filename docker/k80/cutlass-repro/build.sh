@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 #
-# Build the Story #28 sm_37 CUTLASS SGEMM reproducer.
+# Build the sm_37 CUTLASS SGEMM reproducers: a manual check of
+# cutlass-patches/sm37-trait.patch, the CUTLASS patch the xformers build uses.
+#   sgemm_sm37            one SGEMM through arch::Sm37, checked against a
+#                         deterministic input
+#   sgemm_sm37_vs_cublas  the same SGEMM through CUTLASS Sm37 and cuBLAS at
+#                         several sizes, compared element-wise
 #
 # Designed to run inside the K80 builder image (vllm37-builder:latest), which
 # already has CUDA 11.4 + GCC 10 + CMake 4 + Python 3.10. The script:
 #
 #   1. Clones CUTLASS at the FetchContent-pinned tag (v4.0.0 per
-#      vllm/CMakeLists.txt:302) into a scratch directory.
-#   2. Applies sm37-trait.patch (Story #25, merged via PR #54).
-#   3. Compiles sgemm_sm37.cu with nvcc, targeting sm_37.
-#   4. Prints the resulting binary path + size for the caller.
+#      CMakeLists.txt:302) into a scratch directory.
+#   2. Applies sm37-trait.patch.
+#   3. Compiles both .cu files with nvcc, targeting sm_37.
+#   4. Prints the resulting binary paths + sizes for the caller.
 #
 # The runtime execution is intentionally NOT done here — see the
 # k80-cutlass-repro CI workflow for the orchestration.
@@ -101,7 +106,7 @@ ls -la "${WORK_DIR}/build/sgemm_sm37"
 echo ""
 
 echo "=== Step 3b: compile sgemm_sm37_vs_cublas.cu for ${TARGET_ARCH} ==="
-# Story #29 — same SGEMM via CUTLASS Sm37 and cuBLAS, compared element-wise.
+# Same SGEMM via CUTLASS Sm37 and cuBLAS, compared element-wise.
 # Needs -lcublas at link time.
 "${NVCC}" \
     -std=c++17 \

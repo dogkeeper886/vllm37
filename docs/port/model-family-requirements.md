@@ -22,10 +22,10 @@ Anything not proven is marked UNVERIFIED. Parts 2–7 are the subagent reports, 
 | Host compiler | GCC **10.5.0** | `gcc --version` [measured] |
 | FP16 arithmetic intrinsics | Not available: `__hmul`, `__hadd`, `__hmul2` … are defined only for `__CUDA_ARCH__ >= 530` | `/usr/local/cuda-11.4/include/cuda_fp16.hpp:1626-2397` |
 | cuBLAS FP16 GEMM | `cublasGemmEx` (any FP16 combo) and `cublasHgemm` → **CUBLAS_STATUS_ARCH_MISMATCH**. `cublasSgemmEx` with FP16 A/B and FP16 or FP32 C → **SUCCESS**, correct result | 256×256 test on GPU0 [measured] |
-| PyTorch 2.0.1 FP16 matmul on sm_37 | `gemm<at::Half>` calls `cublasSgemmEx` when `prop->major < 5`. Batched FP16 GEMM loops over that `gemm` | pytorch `v2.0.1` `aten/src/ATen/cuda/CUDABlas.cpp:420,449` and `:267,274-283` |
-| Not on sm_37 | BF16, `__dp4a` (sm_61), tensor cores / `mma.sync` (sm_70), `ldmatrix` (sm_75), `cp.async` (sm_80) | `docs/port/kepler-vs-maxwell.md` |
+| PyTorch 2.4.1 FP16 matmul on sm_37 | `gemm<at::Half>` calls `cublasSgemmEx` unless `prop->major >= 5`. Batched FP16 GEMM loops over that `gemm` | pytorch `v2.4.1` `aten/src/ATen/cuda/CUDABlas.cpp:894,925` and `:545,553-554` |
+| Not on sm_37 | BF16, `__dp4a` (sm_61), tensor cores / `mma.sync` (sm_70), `ldmatrix` (sm_75), `cp.async` (sm_80) | NVIDIA Pascal Tuning Guide (`__dp4a`, sm_61), Ampere Tuning Guide (BF16 through HMMA, sm_80) |
 
-**Consequence for dtype.** FP16 *storage* with FP32 *compute* works at the cuBLAS level on this card [measured], and PyTorch 2.0.1 routes FP16 matmuls to that path. This halves weight memory compared with FP32. It does not make custom CUDA kernels that use half arithmetic intrinsics work: those fail to compile for sm_37. Every family below would need its fork kernels checked for FP16 support before `--dtype half` can be trusted.
+**Consequence for dtype.** FP16 *storage* with FP32 *compute* works at the cuBLAS level on this card [measured], and PyTorch 2.4.1 routes FP16 matmuls to that path. This halves weight memory compared with FP32. It does not make custom CUDA kernels that use half arithmetic intrinsics work: those fail to compile for sm_37. Every family below would need its fork kernels checked for FP16 support before `--dtype half` can be trusted.
 
 ### 1.2 Official vLLM cannot run on K80, so every path goes through the fork
 
@@ -42,7 +42,7 @@ Detail and evidence: Part 2, rows R1–R27.
 | torch.compile / Inductor | Triton, CC ≥ 7.0 | sm_37 | `vllm/config/vllm.py:1827-1831` | `--enforce-eager` (`vllm/config/vllm.py:1746-1748`), except helpers at `logprobs.py:10` and `vocab_parallel_embedding.py:175` |
 | Auto dtype | — | Below CC 6.0 only `float32` | `vllm/platforms/cuda.py:255-264` | `--dtype half` is not blocked (`vllm/config/model.py:2467-2470`) |
 
-**The fork avoids each blocker** with an older base (vLLM ~v0.10, v0 engine), torch 2.0.1 built for CUDA 11.4 with sm_37, xformers `cutlassF` patched for sm_37 (Phase 2, PR #66), and the v0 CUDA paged-attention kernels. The fork's paged attention supports head sizes `[32, 64, 80, 96, 112, 120, 128, 192, 256]` (`vllm37:vllm/attention/ops/paged_attn.py:40`), so **head_dim 512 (Gemma 4 full layers) is unsupported**. Its v0 paged decode has no sliding-window argument (`vllm37:vllm/attention/ops/paged_attn.py:90`, Part 6). With `VLLM_ATTENTION_BACKEND=XFORMERS` (the compose default), models with interleaved sliding and full layers have sliding windows disabled and `max_model_len` capped to the window size (`vllm37:vllm/config/__init__.py:718-731`).
+**The fork avoids each blocker** with an older base (vLLM ~v0.10, v0 engine), torch 2.4.1 built for CUDA 11.4 with sm_37, xformers `cutlassF` patched for sm_37 (PR #66), and the v0 CUDA paged-attention kernels. The fork's paged attention supports head sizes `[32, 64, 80, 96, 112, 120, 128, 192, 256]` (`vllm37:vllm/attention/ops/paged_attn.py:40`), so **head_dim 512 (Gemma 4 full layers) is unsupported**. Its v0 paged decode has no sliding-window argument (`vllm37:vllm/attention/ops/paged_attn.py:90`, Part 6). With `VLLM_ATTENTION_BACKEND=XFORMERS` (the compose default), models with interleaved sliding and full layers have sliding windows disabled and `max_model_len` capped to the window size (`vllm37:vllm/config/__init__.py:718-731`).
 
 Porting rule that follows: **a model family is usable on K80 only if its fork model file runs every layer through torch, cuBLAS, the fork's sm_37 attention, or sm_37-safe `_C` ops. Triton anywhere on the path is a blocker.**
 
@@ -95,7 +95,7 @@ Official vLLM enforces `get_min_capability()` at `vllm/config/vllm.py:943`.
 
 - **FP16 storage in the fork:** cuBLAS works [measured]. Still unverified: the fork's custom kernels, xformers `cutlassF` (the fork targets its FP32 path), and FP16 overflow for Gemma (official blocks FP16 for gemma3 at `vllm/config/model.py:2369-2374`) and possibly Granite's muP multipliers.
 - **NCCL:** whether a Kepler-capable NCCL suits TP beyond what the fork already runs (TP=2 tested over SHM).
-- **transformers version in the fork image** for newer configs (`ministral3`, `olmo3`, `smollm3`, `gemma4`): the fork pins `transformers >= 4.55`; the builder image was not inspected here.
+- **transformers version in the fork image** for newer configs (`ministral3`, `olmo3`, `smollm3`, `gemma4`): the fork runs transformers 4.55–4.57 (`requirements/common.txt` `>= 4.55`, `docker/k80/constraints.txt` `< 5`); whether that range has these configs was not checked.
 - Per-report UNVERIFIED items are listed in each part.
 
 ## Parts
@@ -193,7 +193,7 @@ The CUDA, non-MLA decoder priority list is in `vllm/platforms/cuda.py:158-179`. 
 - UNVERIFIED: which of the last CUDA-11 PyTorch wheels (<= 2.7, cu118) still include sm_37 in `torch.cuda.get_arch_list()`. A PyTorch forum post states 1.13 binaries were built for CC 3.7-8.6 (https://discuss.pytorch.org/t/gpu-compute-capability-support-for-each-pytorch-version/62434). The 2.x cu117/cu118 arch lists were not confirmed. Searched: pytorch RELEASE.md and web search. Either way this is moot for official vLLM, which needs the torch >= 2.11 stable ABI (R4).
 - UNVERIFIED: whether driver 470 can run a cu118 build via CUDA 11.x minor-version compatibility (doc says >= 450 for 11.x, https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html). This matters only for a forked or old-torch path.
 - UNVERIFIED: whether an NCCL build that supports sm_37 (CUDA 11.x) is compatible with the torch/vLLM combination for TP (R23). Only `VLLM_NCCL_SO_PATH` override was found.
-- UNVERIFIED: whether `flashinfer` 0.7.0.post1 imports cleanly on a host whose GPUs are all sm_37. The import is reached via the sampler (`topk_topp_sampler.py:101`) unless `VLLM_USE_FLASHINFER_SAMPLER=0`. Not tested; torch is not installed on this host.
+- UNVERIFIED: whether `flashinfer` 0.7.0.post1 imports cleanly on a host whose GPUs are all sm_37. The import is reached via the sampler (`topk_topp_sampler.py:101`) unless `VLLM_USE_FLASHINFER_SAMPLER=0`. Not tested.
 - Not checked in depth: per-kernel shared memory use (48 KB/block on sm_37). Kernels that opt into larger dynamic shared memory were found only in non-core files (`cooperative_topk.cu`, `topk.cu`, `dsv3_fused_a_gemm.cu`, `hisparse_kernels.cu`). `topk.cu` is in the core extension source list (`CMakeLists.txt:449`), but no core-path caller was identified for a dense model.
 - Not checked: whether `torch.accelerator.get_memory_info` (`vllm/v1/worker/gpu_worker.py:279`) and other newer torch APIs set a floor above 2.11. The stable-ABI floor (2.11) already dominates.
 
@@ -308,7 +308,7 @@ Qwen3 dense has no model-specific blocker. Every model-level op (RMSNorm with QK
 
 Blockers, all shared runtime:
 1. **Attention backend.** Official CUDA backends need FA (CC 8.0), FlashInfer (CC 8.0), or Triton (`platforms/cuda.py:158-178`). Fix: the fork's own sm_37 attention backend, already part of the fork's work.
-2. **`_C` built for ≥ 7.0 and torch 2.13** (`CMakeLists.txt:71,117-131`). Fix: the fork's toolchain (CUDA 11.4, torch 2.0.1).
+2. **`_C` built for ≥ 7.0 and torch 2.13** (`CMakeLists.txt:71,117-131`). Fix: the fork's toolchain (CUDA 11.4, torch 2.4.1).
 3. **FP32-only dtype below CC 6.0** (`platforms/cuda.py:262-264`). This is memory, not correctness:
 
    | Model | FP32 weights | Needs |
@@ -1170,7 +1170,7 @@ All repos below ship `config.json` (HF), `params.json` + `consolidated*.safetens
 | Llama-4 q scaling | torch elementwise | none | any | OK | `mistral.py:117-138` | – | yes |
 | SiluAndMul | CUDA `activation_kernels.cu` (a cp.async path is guarded `__CUDA_ARCH__ >= 800` at :522) | `_C` | – | shared runtime | `activation.py:146` | `SiluAndMul.forward_native` `activation.py:141` | yes |
 | Decoder attention (full causal, GQA 32/8, hd 128) | v1 backends: FLASH_ATTN (CC ≥ 8.0, `flash_attn.py:451`), FLASHINFER (CC ≥ 8.0, `flashinfer.py:514-519`), TRITON_ATTN (CC check `True`, `triton_attn.py:413`, but Triton does not target sm_37) | FA2/FlashInfer/Triton | 80 / Triton | **Blocked in official tree** (shared runtime) | as cited | none model-specific; K80 fork uses patched xformers/SDPA on V0 (`vllm37: vllm/platforms/cuda.py:363-385`) | via fork only |
-| Pixtral ViT attention | MMEncoderAttention → TORCH_SDPA on CC < 8 | torch SDPA with `scale=` (torch ≥ 2.1) and `enable_gqa=` (torch ≥ 2.5) kwargs | any | OK in official runtime. **torch 2.0.1 lacks `enable_gqa`/`scale` kwargs** (UNVERIFIED against torch 2.0 docs; `enable_gqa` is documented from 2.5: https://pytorch.org/docs/2.5/generated/torch.nn.functional.scaled_dot_product_attention.html) | `vit_attn_wrappers.py:263-264`, `platforms/cuda.py:570-573` | vllm37 Pixtral uses xformers or `nn.functional.scaled_dot_product_attention` (`vllm37: pixtral.py:675-681`, :1102-1112) | yes in fork |
+| Pixtral ViT attention | MMEncoderAttention → TORCH_SDPA on CC < 8 | torch SDPA with `scale=` (torch ≥ 2.1) and `enable_gqa=` (torch ≥ 2.5) kwargs | any | OK in official runtime. **The fork's torch 2.4.1 has `scale=` but lacks `enable_gqa=`** (checked in the host build; `enable_gqa` is documented from 2.5: https://pytorch.org/docs/2.5/generated/torch.nn.functional.scaled_dot_product_attention.html) | `vit_attn_wrappers.py:263-264`, `platforms/cuda.py:570-573` | vllm37 Pixtral uses xformers or `nn.functional.scaled_dot_product_attention` (`vllm37: pixtral.py:675-681`, :1102-1112) | yes in fork |
 | Pixtral 2D rope | torch complex64 | none | any | OK | `pixtral.py:712-723` | – | yes |
 | Patch conv | `Conv2dLayer` (cuDNN/unfold+GEMM) | – | any | OK (UNVERIFIED cuDNN on sm_37) | `pixtral.py:960`, :1517 | – | – |
 | torch.compile of decoder | `@support_torch_compile` on `MistralModel` (`mistral.py:206`) → Inductor/Triton | Triton | – | must run `--enforce-eager` / compilation off (shared runtime) | `mistral.py:206` | eager CustomOp `forward_native` | yes |
@@ -1197,7 +1197,7 @@ All repos below ship `config.json` (HF), `params.json` + `consolidated*.safetens
 #### Verdict for K80
 Blockers:
 1. **Default Ministral-3 Instruct and Devstral-Small-2 checkpoints are FP8.** `Fp8Config.get_min_capability()=75` raises at `config/vllm.py:943`. Marlin FP8 needs CC ≥ 7.5 (fork: 80). Devstral-Small-2-24B-Instruct-2512 has no official BF16 or GGUF variant (mistralai listing).
-   → Use the `-BF16` repos (3B/8B/14B Instruct), or the BF16-only Base/Reasoning repos, with `--dtype half`. For Devstral 2, add a load-time dequant: per-tensor scale (`weight_block_size: null`, `qscheme_act: TENSOR`), so `w_fp16 = w_fp8.float() * weight_scale`. A tiny `process_weights_after_loading` in torch, or an offline conversion script. Note: torch 2.0.1 has no `float8_e4m3fn` dtype (UNVERIFIED in this session; float8 dtypes were added in PyTorch 2.1), so the conversion must happen offline on a newer torch.
+   → Use the `-BF16` repos (3B/8B/14B Instruct), or the BF16-only Base/Reasoning repos, with `--dtype half`. For Devstral 2, add a load-time dequant: per-tensor scale (`weight_block_size: null`, `qscheme_act: TENSOR`), so `w_fp16 = w_fp8.float() * weight_scale`. A tiny `process_weights_after_loading` in torch, or an offline conversion script. The fork's torch 2.4.1 has the `float8_e4m3fn` dtype (checked in the host build), so the load-time dequant can run on the fork.
 2. **BF16 → FP16/FP32.** CC < 8.0 rejects BF16 (`platforms/cuda.py:656-674`) and auto picks FP32 on Kepler (`cuda.py:262-264`). FP32 doubles memory: 3B ≈ 15 GB > 12 GB per K80 die. FP16 overflow risk for these checkpoints is UNVERIFIED.
    → Run `--dtype half`. 3B (≈ 8.5 GB FP16 incl. vision; ≈ 7.7 GB text-only) fits one die. 8B needs TP=2, 14B TP=4, 24B (Magistral) TP=4–8.
 3. **Decoder attention backend**: no v1 backend runs on sm_37 (FA/FlashInfer CC ≥ 8.0, Triton not Kepler). Shared runtime, other agent.
@@ -1251,7 +1251,7 @@ QK-norm: Olmo3 normalizes q and k over the full projection width, `q_norm = RMSN
 | SiluAndMul | `activation_kernels.cu` | `_C` | – | shared runtime | `fusers/glu.py:115-118` | `activation.py:141` | yes |
 | Interleaved sliding-window attention (24/32 layers, window 4096) + MHA (7B: 32 KV heads) | FA2 / FlashInfer / Triton / Flex | CC ≥ 8.0 or Triton | 80 / Triton | **Blocked in official tree** | `flash_attn.py:386,451`; `flashinfer.py:476,514`; `triton_attn.py:367,413`; `flex_attention.py:113` | none model-specific | no |
 | torch.compile | Inductor/Triton | Triton | – | must use `--enforce-eager` | `transformers/base.py:39,257` | eager | yes |
-| Transformers backend itself | transformers ≥ 5.16.1 | torch version required by transformers 5.x (UNVERIFIED; not checked) | – | not usable on the fork's torch 2.0.1 (UNVERIFIED) | `requirements/common.txt:10` | – | – |
+| Transformers backend itself | transformers ≥ 5.16.1 | torch version required by transformers 5.x (UNVERIFIED; not checked) | – | not usable on the fork: transformers 5.x imports PyTorch 2.5 APIs and the fork runs torch 2.4.1 (`vllm37: docker/k80/constraints.txt`). The fork's own `--model-impl transformers` runs on transformers 4.57 | `requirements/common.txt:10` | – | – |
 
 #### Quantized format support
 | Format | vLLM method | Min capability | Evidence |
@@ -1555,7 +1555,7 @@ Official vLLM has **no native Hunyuan dense model file**; it is served by the ge
 Blockers (official vLLM):
 1. Attention: no CUDA backend below CC 8.0 without Triton (S3). → Port work: use the fork's existing sm_37 attention path (fork v0 engine) — this is shared-runtime work, not model-specific.
 2. No `_C` kernels for sm_37 (S1) → RMSNorm/SiluAndMul must run native (S4/S5) or `_C` must be rebuilt for sm_37 (fork already does this per its own build; not verified here).
-3. Official path depends on Transformers v5 + torch.fx fusers on torch 2.13 (`requirements/cuda.txt:7`, `requirements/common.txt:10`) — not runnable on torch 2.0.1/CUDA 11.4. → Use the fork's **native** `hunyuan_v1.py` instead (registered, includes NTK-alpha rope); no backend port needed.
+3. Official path depends on Transformers v5 + torch.fx fusers on torch 2.13 (`requirements/cuda.txt:7`, `requirements/common.txt:10`) — not runnable on the fork's torch 2.4.1/CUDA 11.4. → Use the fork's **native** `hunyuan_v1.py` instead (registered, includes NTK-alpha rope); no backend port needed.
 4. Quantized releases: FP8 (min 70/75/89), AWQ (75), GPTQ (60 + desc_act=true rejected) all fail S7 at 37. → Only BF16 releases are usable; convert to fp16 offline, or dequantize GPTQ/AWQ to fp16 on load. An sm_37 int4 GEMM would need a new non-`half2` kernel (fp32 accumulate, scalar `__half2float` conversions).
 5. Memory (S8): fp32 auto-dtype weights = 0.5B 2.2 GB, 1.8B 7.2 GB, 4B 16.9 GB, 7B 30.0 GB; fp16 halves this. → 0.5B/1.8B fit one die; 4B needs fp16 (8.4 GB) on one die or TP=2; 7B needs fp16 + TP=2 (15.0 GB across 2×12 GB) with little KV headroom.
 Model-specific ops (RMSNorm, QK-norm, SiLU-mul, NTK-alpha RoPE) all have pure-torch or fork-native implementations; **Hunyuan dense is not blocked by model-specific kernels on K80**.
@@ -1669,7 +1669,7 @@ Served by the generic Transformers backend (no native `smollm3.py`; `ls models |
 | RoPE / NoPE | HF torch code | torch | any | OK | `HF-T:…smollm3.py:49-100, 200, 222-224` | — | — |
 | torch.compile | Inductor → Triton | Triton | not Kepler | enabled by default | `transformers/utils.py:359-369` | `-O0` / `--enforce-eager` | yes |
 | Attention | FA / FI / Triton / Flex | see S3 | 8.0 / Triton | **blocker** | S3 | none on CUDA | no |
-| Transformers backend itself | HF Transformers v5 + torch.fx fusers | transformers ≥ 5.16.1, torch 2.13 | — | not runnable on torch 2.0.1 stack | `requirements/common.txt:10`, `requirements/cuda.txt:7` | native model file (none exists) | — |
+| Transformers backend itself | HF Transformers v5 + torch.fx fusers | transformers ≥ 5.16.1, torch 2.13 | — | not runnable on the fork's torch 2.4.1 stack | `requirements/common.txt:10`, `requirements/cuda.txt:7` | native model file (none exists) | — |
 
 #### Quantized format support
 | Format | vLLM method | Min capability | Evidence |
@@ -1678,12 +1678,12 @@ Served by the generic Transformers backend (no native `smollm3.py`; `ls models |
 
 #### In the K80 fork (vllm37)
 - Model file: **absent** — no `smollm3*.py` in `F:/vllm/model_executor/models/` (only `smolvlm.py`); generic backend file `F:/vllm/model_executor/models/transformers.py` exists.
-- Registry: **no explicit entry** (grep `SmolLM3` in `F:/vllm/model_executor/models/registry.py`: none). Fallback resolution via `_try_resolve_transformers` (`F:/vllm/model_executor/models/registry.py:506-567`, uses `getattr(transformers, architecture)` and `is_backend_compatible()`), which needs an installed Transformers that has `SmolLM3ForCausalLM` (fork requires `transformers >= 4.55.0`, `F:/requirements/common.txt:10`; SmolLM3 configs were written by 4.53/4.54.dev). Whether such a Transformers version runs on torch 2.0.1: UNVERIFIED (no Transformers with `smollm3`/`hunyuan_v1_dense` is installed anywhere on this machine — `find / -type d -name smollm3` returned nothing).
+- Registry: **no explicit entry** (grep `SmolLM3` in `F:/vllm/model_executor/models/registry.py`: none). Fallback resolution via `_try_resolve_transformers` (`F:/vllm/model_executor/models/registry.py:506-567`, uses `getattr(transformers, architecture)` and `is_backend_compatible()`), which needs an installed Transformers that has `SmolLM3ForCausalLM` (fork requires `transformers >= 4.55.0`, `F:/requirements/common.txt:10`; SmolLM3 configs were written by 4.53/4.54.dev). The fork's host build has transformers 4.57.6 on torch 2.4.1, and it exports `SmolLM3ForCausalLM` and `HunYuanDenseV1ForCausalLM`; serving either through the fallback is untested.
 
 #### Verdict for K80
 Blockers:
 1. Attention (S3) and `_C` build (S1) — shared runtime.
-2. No native model in either tree; the official path needs Transformers v5 + torch 2.13; the fork's Transformers fallback needs Transformers ≥ 4.53 on torch 2.0.1 (UNVERIFIED compatibility). → Porting work: add a native `smollm3.py` to the fork — it is Llama with a per-layer "skip RoPE" flag (`no_rope_layers[i]==0` → don't call `rotary_emb`), tied embeddings, no QK-norm, no sliding window; roughly a 20-line subclass of the fork's `llama.py`. No new kernels.
+2. No native model in either tree; the official path needs Transformers v5 + torch 2.13; the fork's Transformers fallback needs Transformers ≥ 4.53 (the fork runs 4.55–4.57 on torch 2.4.1; SmolLM3 through it is untested). → Porting work: add a native `smollm3.py` to the fork — it is Llama with a per-layer "skip RoPE" flag (`no_rope_layers[i]==0` → don't call `rotary_emb`), tied embeddings, no QK-norm, no sliding window; roughly a 20-line subclass of the fork's `llama.py`. No new kernels.
 3. Memory (S8): 3.075 B → 12.3 GB fp32 (does not fit one 12 GB die) / 6.15 GB fp16 (fits, ~5 GB left for KV on one die) → use `--dtype half` or TP=2 in fp32.
 NoPE itself is not a blocker (it is a control-flow flag, no kernel).
 
@@ -1706,7 +1706,7 @@ Instructions read from official vLLM (`csrc/libtorch_stable/…`) and the fork:
 | NVFP4 / MXFP4 | Hardware FP4 conversion and block-scaled FP4 multiply | `cvt.rn.satfinite.e2m1x2.f32` (`quantization/fp4/nvfp4_utils.cuh:79`); MoE GEMM "on SM100" (`quantization/fp4/mxfp4_blockwise_moe_kernel.cu:5`) | FP4 conversion, block-scaled FP4 tensor cores |
 | GGUF (fork's MMVQ/MMQ) | Four int8 multiply-adds in one instruction | `__dp4a` (`vllm37:csrc/quantization/gguf/vecdotq.cuh:57`) | Integer dot-product unit (sm_61) |
 
-The K80 has: FP32 fused multiply-add, 32-bit integer shift / AND / OR, byte permute, warp shuffle, 48 KB shared memory per block (112 KB and 128 K registers per SM, `docs/port/kepler-vs-maxwell.md:82-83`).
+The K80 has: FP32 fused multiply-add, 32-bit integer shift / AND / OR, byte permute, warp shuffle, 48 KB shared memory per block (112 KB and 128 K registers per SM, NVIDIA Kepler Tuning Guide on GK210).
 
 ### 9.2 Two kinds of quantization
 

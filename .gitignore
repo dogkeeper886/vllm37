@@ -197,9 +197,6 @@ _build/
 *_hip*
 hip_compat.h
 
-# Benchmark dataset
-benchmarks/**/*.json
-
 # Linting
 actionlint
 shellcheck*/

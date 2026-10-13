@@ -47,9 +47,9 @@ Engine settings that do not change per run (`VLLM_USE_V1=0`, `TORCHDYNAMO_DISABL
 
 ## Diagnosing a hang
 
-Phase-1 instrumentation (issue #10) adds opt-in trace logging at the TP-init
-stages most likely to hang, plus crash-safe stdio so final log lines actually
-reach disk when the kernel wedges.
+The fork adds opt-in trace logging at the TP-init stages most likely to hang,
+plus crash-safe stdio so final log lines actually reach disk when the kernel
+wedges.
 
 ### Enabling trace logs
 
@@ -87,9 +87,7 @@ runtime and never touches Python's stdio layer.
    `post-warmup sync`.
 
 2. **Compare `elapsed_ms` / `elapsed_s` fields** against expected. The
-   numbers below are **initial estimates** derived from the flow study, not
-   measured baselines — replace them with observed CI medians once a TP=1
-   run establishes ground truth:
+   numbers below are estimates, not measured baselines:
    - `init_process_group` should complete in < 2 s. > 5 s = NCCL probe stall.
    - `new_group` with NCCL backend: < 500 ms. Larger = PCIe / P2P issue.
    - `load_model`: depends on model size and disk; typically < 30 s for 3 B FP32.
@@ -103,11 +101,11 @@ runtime and never touches Python's stdio layer.
    buffers some messages; the last NCCL line often tells you which collective
    was in flight when the app wedged.
 
-### Phase-1 validation policy
+### Before raising TP
 
 TP=1 is the CI default. Before running TP=2, make sure host-side `dmesg` /
 `nvidia-smi dmon` capture is running so a hang can be diagnosed afterwards; CI
-does not capture these yet. TP=4 stays off (see Safety below).
+does not capture these yet. TP=4 stays off (see [Safety](#safety)).
 
 ## Files
 

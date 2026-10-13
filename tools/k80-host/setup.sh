@@ -79,7 +79,7 @@ stage_toolchain() {
       https://github.com/pytorch/pytorch.git "$SRC/pytorch-$TORCH_VERSION"
     cd "$SRC/pytorch-$TORCH_VERSION"
     pip install -q -c "$CONSTRAINTS" -r requirements.txt
-    # A tag's version.txt carries a dev label (e.g. 2.0.0a0); label the wheel
+    # A tag's version.txt carries a dev label (e.g. 2.4.0a0); label the wheel
     # with the real release. Flash and memory-efficient attention kernels need
     # sm_50+ and are not built for sm_37.
     PYTORCH_BUILD_VERSION="$TORCH_VERSION" PYTORCH_BUILD_NUMBER=1 \

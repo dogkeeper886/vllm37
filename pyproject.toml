@@ -54,7 +54,6 @@ include = ["vllm*"]
 [tool.yapfignore]
 ignore_patterns = [
     ".buildkite/**",
-    "benchmarks/**",
     "build/**",
     "examples/**",
 ]
@@ -136,7 +135,6 @@ exclude = [
 [tool.isort]
 skip_glob = [
     ".buildkite/*",
-    "benchmarks/*",
     "examples/*",
 ]
 use_parentheses = true
@@ -164,7 +162,7 @@ python = "./.venv"
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
-    "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
+    "tests/lora/data/*", "build/*",
     "vllm/third_party/*"]
 ignore-hidden = true
 ignore-files = true

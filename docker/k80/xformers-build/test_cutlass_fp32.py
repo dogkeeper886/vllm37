@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Story #34 (Phase 2, epic #12) — runtime smoke test for XFormers cutlassF on K80.
+# Runtime smoke test for XFormers cutlassF on K80. k80-runtime.yml runs it
+# inside the runtime image before the server takes the GPU.
 #
-# First time XFormers kernels actually touch the K80 GPU. Allocates small fp32
+# Allocates small fp32
 # q/k/v tensors on cuda:0, calls xformers.ops.memory_efficient_attention, and
 # compares against a reference computed manually with PyTorch eager ops.
 # Reports PASS/FAIL based on max absolute / max relative error.
 #
-# This proves Phase 1's bit-exact CUTLASS finding extends to XFormers'
-# attention path: not just GEMM, but the full attention algorithm
-# (Q·K^T → softmax → ·V) running on sm_37.
+# This covers the full attention algorithm (Q·K^T → softmax → ·V) on sm_37,
+# beyond the GEMM that cutlass-repro/ checks.
 #
 # Hardware safety: TP=1-equivalent, single die, batch=1, small tensors.
-# Total VRAM: ~16 MB. No NCCL. Always-fine timing per the saved rule.
+# Total VRAM: ~16 MB. No NCCL.
 
 import sys
 import torch
@@ -48,7 +48,7 @@ def reference_attention(q, k, v):
 
 
 def main():
-    print("=== Story #34 — XFormers cutlassF fp32 smoke test ===")
+    print("=== XFormers cutlassF fp32 smoke test ===")
 
     # Device + props
     if not torch.cuda.is_available():
