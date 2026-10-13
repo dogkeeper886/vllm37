@@ -26,7 +26,7 @@ models into three tiers:
 | Setup | Usable weights + KV (at `GPU_MEM_UTIL=0.85`) | Power |
 |---|---|---|
 | 1 die (TP=1) | ~9.7 GB | safe |
-| 1 board (TP=2, GPU0+GPU1) | ~19 GB | safe, tested |
+| 1 board (TP=2, GPU0+GPU1) | ~19 GB | safe; last run before the 2026-10 build changes |
 | 4 dies (TP=4) | ~39 GB | ⚠ power-risky, unvalidated |
 
 KV cache is FP32: bytes per token = layers × 2 × kv_heads × head_dim × 4.
@@ -54,7 +54,7 @@ KV cache is FP32: bytes per token = layers × 2 × kv_heads × head_dim × 4.
 | ✗ | LFM2.5 1.2B / 2.6B | `LiquidAI/LFM2.5-*` | 2026-01/07 | 1.17–2.7B | 128K | 4.7–10.8 GB | — | — | C — conv layers |
 | ✗ | gpt-oss 20B | `openai/gpt-oss-20b` | 2025-08 | 20.9B | — | 84 GB | — | — | C — MXFP4 MoE |
 
-Tier A means the architecture is registered; loading each model on K80 is still untested.
+Tier A means the architecture is registered. Only Qwen3-0.6B has been loaded on the K80; the others are untested.
 All repos above are ungated except Gemma (license click-through).
 
 ## Later: GGUF sizes

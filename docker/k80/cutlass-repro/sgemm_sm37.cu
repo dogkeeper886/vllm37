@@ -2,13 +2,13 @@
 //
 // Minimal CUTLASS SGEMM reproducer that dispatches through cutlass::arch::Sm37.
 //
-// Story #28 (Phase 1, epic #12) — proves that:
+// Proves that:
 //   1. NVCC compiles a CUTLASS GEMM with TORCH_CUDA_ARCH_LIST=3.7
 //      against patched CUTLASS (sm37-trait.patch from #25 applied).
 //   2. The compiled binary executes correctly on a Tesla K80 (sm_37 / Kepler).
 //
 // FP32 only — Kepler has no tensor cores, no native FP16 compute.
-// SIMT path only — no tensor-op gating reachable per Story 0.1 §5.
+// SIMT path only — no tensor-op gating reachable.
 //
 // Build via the build.sh in this directory, or directly:
 //   nvcc -std=c++17 -arch=sm_37 \
@@ -38,9 +38,9 @@
 } while (0)
 
 int main() {
-    // Use the new Sm37 arch tag added by sm37-trait.patch (Story #25).
-    // OpClassSimt is verified by Story 0.1 §5 to use scalar FP32 FMA only,
-    // which sm_37 (Kepler GK210) supports natively (Story 0.4 §3).
+    // Use the Sm37 arch tag added by sm37-trait.patch.
+    // OpClassSimt uses scalar FP32 FMA only, which sm_37 (Kepler GK210)
+    // supports natively.
     using ArchTag = cutlass::arch::Sm37;
     using OpClass = cutlass::arch::OpClassSimt;
 
@@ -127,7 +127,7 @@ int main() {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
 
-    std::cout << "=== Story #28 — CUTLASS sm_37 SGEMM reproducer ===\n";
+    std::cout << "=== CUTLASS sm_37 SGEMM reproducer ===\n";
     std::cout << "device       : " << prop.name << " (cc "
               << prop.major << "." << prop.minor << ")\n";
     std::cout << "problem      : " << M << " x " << N << " x " << K

@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
 #
 # Build XFormers v0.0.23 from source against patched CUTLASS, targeting sm_37
-# (Tesla K80). Story #33 of epic #12.
-#
-# Designed to run inside the K80 builder image (vllm37-builder:latest), which
-# has CUDA 11.4 + GCC 10 + PyTorch 2.4.1 + CMake 4 + Python 3.10. The script:
+# (Tesla K80). tools/k80-host/setup.sh runs this as its `xformers` stage, on
+# the host and in the runtime image; it needs CUDA 11.4, GCC 10 and the sm_37
+# PyTorch from the `toolchain` stage. The script:
 #
 #   1. Clones XFormers v0.0.23 with submodules (recursive — pulls bundled
 #      CUTLASS at e0aaa3c3 / Sep 2023 / pre-v3.5).
 #   2. Applies XFormers patches (xformers-patches/*.patch).
 #   3. Applies CUTLASS patches to the bundled submodule
-#      (cutlass-patches/*.patch — same patches Phase 1 verified).
+#      (cutlass-patches/*.patch).
 #   4. Builds XFormers with TORCH_CUDA_ARCH_LIST="3.7" so NVCC emits sm_37
 #      kernels.
 #   5. Verifies the install (xformers._C imports; FwOp.CUDA_MINIMUM_COMPUTE_
 #      CAPABILITY reflects our patch).
+#
+# Patches:
+#   xformers-patches/sm37-generate-kernels.patch    adds sm_37 to the kernel
+#       generator, so cutlassF kernels are instantiated for the K80.
+#   xformers-patches/sm37-cc-gate.patch             lowers the dispatcher's
+#       minimum compute capability from (5, 0) to (3, 7). Ops that set their
+#       own minimum (Flash, Triton) keep it.
+#   xformers-patches/sm37-from-seqlens-device.patch backports the device=
+#       argument of BlockDiagonalMask.from_seqlens, which vLLM's XFormers
+#       backend passes.
+#   cutlass-patches/sm37-trait.patch                adds the arch::Sm37 trait
+#       to CUTLASS.
+#
+# Pin: XFormers v0.0.29 removed the cutlass kernels from its tree, so the tag
+# must be older than that. The patches are written against v0.0.23; a newer
+# tag (up to v0.0.28.post3) means porting them.
 #
 # Idempotent: re-applies patches via `git apply -3` so a previously-patched
 # tree doesn't trip up subsequent runs.
@@ -116,7 +131,7 @@ echo ""
 # Symptom of skipping this: build succeeds, .so loads, dispatcher accepts the
 # device, but kernel launch fails with "cutlassF: no kernel found to launch!"
 # because the compiled .so contains _sm50/_sm70/_sm75/_sm80 symbols but no
-# _sm37 (PR #64 review run 24959810424 caught this).
+# _sm37.
 echo "=== Step 2c: regenerate autogen kernels (with sm_37) ==="
 cd "${WORK_DIR}/xformers"
 python xformers/csrc/attention/cuda/fmha/generate_kernels.py
@@ -161,7 +176,6 @@ echo ""
 # Step 3: build XFormers
 # -----------------------------------------------------------------------------
 echo "=== Step 3: build XFormers (TORCH_CUDA_ARCH_LIST=${TARGET_ARCH_LIST}, MAX_JOBS=${MAX_JOBS}) ==="
-echo "this can take 30+ minutes on K80 hardware"
 cd "${WORK_DIR}/xformers"
 
 export TORCH_CUDA_ARCH_LIST="${TARGET_ARCH_LIST}"
@@ -171,15 +185,9 @@ export FORCE_CUDA=1
 # need on K80 — Triton requires sm_70+).
 export XFORMERS_DISABLE_TRITON=1
 
-# --no-build-isolation reuses the system Python's installed build deps
-# (setuptools, wheel, ninja, pybind11, torch). The K80 builder image already
-# has these for vLLM compilation.
-#
-# No `| tail` here — the workflow captures full stdout/stderr to /out/build.log
-# for the artifact. The GitHub-log view is abbreviated by the workflow's own
-# `tail -200 /out/build.log` step. Truncating here would lose the full nvcc
-# output that we need to diagnose first-run failures on a novel
-# (PyTorch 2.4.1 + XFormers v0.0.23 + sm_37) combination.
+# --no-build-isolation reuses the build deps the toolchain stage installed
+# (setuptools, wheel, ninja, torch). Output is not truncated: the full nvcc
+# log is what diagnoses a failed sm_37 compile.
 pip install -v --no-build-isolation . 2>&1
 
 echo ""

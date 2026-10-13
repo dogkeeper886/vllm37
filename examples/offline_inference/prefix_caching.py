@@ -4,9 +4,6 @@
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-# NOTE: This is just a running example. For benchmarking purpose,
-# please see benchmarks/benchmark_prefix_caching.py
-
 # Common prefix.
 prefix = (
     "You are an expert school principal, skilled in effectively managing "

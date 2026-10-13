@@ -2,8 +2,6 @@ name: K80 Host Info
 
 # Pure read-only status query of the self-hosted K80 runner.
 # No GPU compute, no docker, no TP. Safe at any time.
-# Produced output is the citation source for docs/port/cuda-11.4-version-pins.md
-# §5 (driver / toolkit / Kepler support claims).
 
 on:
   workflow_dispatch:

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Story #29 (Phase 1, epic #12) — numerical correctness check.
+// Numerical correctness check.
 // Runs the same SGEMM through both CUTLASS (with cutlass::arch::Sm37, SIMT
 // path) and cuBLAS, compares element-wise, and reports tolerance achieved
 // across multiple matrix sizes with randomized inputs.
@@ -48,7 +48,7 @@
     } \
 } while (0)
 
-// CUTLASS SGEMM via the new arch::Sm37 tag (PR #54).
+// CUTLASS SGEMM via the arch::Sm37 tag (cutlass-patches/sm37-trait.patch).
 // Column-major to match cuBLAS conventions.
 using CutlassGemm = cutlass::gemm::device::Gemm<
     float, cutlass::layout::ColumnMajor,
@@ -178,7 +178,7 @@ int main() {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
 
-    std::cout << "=== Story #29 — CUTLASS Sm37 vs cuBLAS SGEMM ===\n";
+    std::cout << "=== CUTLASS Sm37 vs cuBLAS SGEMM ===\n";
     std::cout << "device       : " << prop.name << " (cc "
               << prop.major << "." << prop.minor << ")\n";
 

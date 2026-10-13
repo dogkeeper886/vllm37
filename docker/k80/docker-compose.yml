@@ -1,6 +1,7 @@
 services:
   vllm:
     image: vllm37-local:latest
+    container_name: vllm37
     runtime: nvidia
     shm_size: '4g'
     deploy:

@@ -10,7 +10,7 @@ Builds and serves vllm37 on the host filesystem, for fast iteration on a machine
 
 ## Requirements
 
-- NVIDIA driver 470, CUDA 11.4 at `/usr/local/cuda-11.4`, GCC 10 at `/usr/local/bin`, CMake ≥ 3.26, git
+- NVIDIA driver 470, CUDA 11.4 at `/usr/local/cuda-11.4`, GCC 10 at `/usr/local/bin`, CMake ≥ 3.26, git, wget
 - Python build headers (Rocky 8): `openssl-devel libffi-devel bzip2-devel xz-devel zlib-devel readline-devel sqlite-devel tk-devel gdbm-devel ncurses-devel lz4-devel`
 
 ## Build
@@ -30,6 +30,17 @@ MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 tools/k80-host/serve.sh
 ```
 
 Same engine settings as `docker/k80/docker-compose.yml`. Keep `TP_SIZE` at 1 or 2: TP=4 across both K80 boards can overload the shared CPU power cable.
+
+## Run as a service
+
+```bash
+tools/k80-host/install-service.sh        # writes ~/.config/systemd/user/vllm37.service
+systemctl --user start vllm37
+tail -f ~/.local/state/vllm37/serve.log
+systemctl --user stop vllm37
+```
+
+The service runs `serve.sh` with the settings in `~/.config/vllm37/serve.env` (template: `serve.env.example`). It is installed disabled, so it runs only when started. Each start moves the previous log to `serve.log.1`. CI stops it for a test and starts it again afterwards.
 
 ## Work in the shell
 

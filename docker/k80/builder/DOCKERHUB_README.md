@@ -34,7 +34,7 @@ Install packages into this image only with the fork's pins (`pip install -c dock
 ## Rebuild
 
 ```bash
-make -C docker/k80 build-builder JOBS=8    # about 2.5 h without cache
+make -C docker/k80 build-builder JOBS=8    # about 2 h without cache
 ```
 
 `JOBS` sets parallel compile jobs (about 2 GB of RAM each). Versions are set in `docker/k80/builder/Dockerfile` (GCC, CMake) and `tools/k80-host/setup.sh` (Python, cuDNN, PyTorch).

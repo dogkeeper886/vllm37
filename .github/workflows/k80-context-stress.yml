@@ -1,16 +1,8 @@
-name: K80 Phase 2 Context-Length Stress
+name: K80 Context-Length Stress
 
-# Story 3.0 (gating measurement) per docs/port/flash-attn-fattn-vec-recon.md.
-# Sweeps --max-model-len with the current Phase 2 stack (XFormers cutlassF
-# backend) and records boot time, prefill latency, prompt token count, and
-# observed KV-cache size for each setting. Three branch outcomes feed the
-# Phase 3 go/no-go:
-#
-#   1. Hits ≥8K cleanly → Phase 3 has no headline prize on K80; close it.
-#   2. Hits a specific wall → Phase 3 targets that wall, not "implement FA
-#      from scratch."
-#   3. Wall is in framework rather than kernel (e.g., hardcoded buffer) →
-#      fix is a vLLM patch, not a new attention backend.
+# Sweeps --max-model-len on the XFormers cutlassF backend and records boot
+# time, prefill latency, prompt token count and observed KV-cache size for
+# each setting.
 #
 # TP=1 only. The default model must support the longest swept context:
 # Qwen/Qwen3-0.6B has max_position_embeddings 40960.
@@ -62,6 +54,7 @@ jobs:
       TARGET_FILL: ${{ inputs.target_fill || '0.75' }}
       VLLM_K80_TRACE: "1"
       VLLM_LOG_DIR: /tmp/k80-ci-logs
+      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
       CONTEXT_LENGTHS: ${{ inputs.context_lengths || '2048,4096,8192,16384' }}
       RESULTS_FILE: /tmp/k80-ci-logs/context-stress-results.tsv
 
@@ -80,6 +73,9 @@ jobs:
           # TSV header — one row per context length will append below.
           printf 'context_length\tstatus\tboot_seconds\tprefill_seconds\tprompt_tokens\tcompletion_tokens\tkv_cache\tnote\n' > "$RESULTS_FILE"
 
+      - name: Yield GPU
+        run: docker/k80/ci/gpu-yield.sh
+
       - name: Sweep context lengths
         working-directory: docker/k80
         run: |
@@ -94,7 +90,7 @@ jobs:
             ITER_LOG="$VLLM_LOG_DIR/iter-L${L}.log"
 
             # Build a prompt of approximately TARGET_FILL * L tokens. Rough
-            # heuristic ~3.5 chars/token for English text — vLLM reports the
+            # heuristic ~4 chars/token for English text — vLLM reports the
             # exact prompt_tokens in the response so the imprecision washes
             # out. We over-shoot slightly and let vLLM reject if too long.
             TARGET_TOKENS=$(awk -v L="$L" -v F="$TARGET_FILL" 'BEGIN { printf "%d", L * F }')
@@ -105,37 +101,30 @@ jobs:
               'BEGIN { s=""; while (length(s) < target) s = s p; print substr(s, 1, target) }')
             echo "Generated prompt: ${#PROMPT} chars (~$TARGET_TOKENS target tokens)"
 
-            # Boot container with this max_model_len.
+            # Boot the container with this max_model_len and wait for ready,
+            # max 10 min; fails fast, with the container log, if it exits.
             BOOT_START=$(date +%s)
-            MAX_MODEL_LEN=$L \
-            TP_SIZE=$TP_SIZE MODEL=$MODEL \
-            VLLM_K80_TRACE=$VLLM_K80_TRACE VLLM_LOG_DIR=$VLLM_LOG_DIR \
-            GPU_MEM_UTIL=$GPU_MEM_UTIL \
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d 2>&1 | tee -a "$ITER_LOG"
-
-            # Wait for ready, max 10 min; fails fast if the container exits.
             READY=0
-            WAIT_MSG=$(ci/wait-ready.sh 600) && READY=1
-            echo "$WAIT_MSG"
-            STATE=$(sed -n 's/^Container state=\([a-z]*\).*/\1/p' <<<"$WAIT_MSG")
+            UP_MSG=$(MAX_MODEL_LEN=$L ./container-up.sh 600 2>&1) && READY=1
+            echo "$UP_MSG" | tee -a "$ITER_LOG"
+            STATE=$(sed -n 's/^Container state=\([a-z]*\).*/\1/p' <<<"$UP_MSG" | tail -1)
             STATE=${STATE:-unknown}
             BOOT_SECS=$(( $(date +%s) - BOOT_START ))
 
             if [ "$READY" != "1" ]; then
               echo "::warning::L=$L did not become ready within 600s (container state: $STATE)"
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --tail 200 --no-color >> "$ITER_LOG" 2>&1 || true
               # Detect the most-likely root cause from logs.
               NOTE="state=$STATE"
               if grep -qiE "out of memory|cuda.*memory|cublas.*alloc" "$ITER_LOG"; then NOTE="OOM"; fi
               if grep -qiE "max_model_len.*greater than|context.*too long" "$ITER_LOG"; then NOTE="ctx_reject"; fi
               printf '%s\tBOOT_FAIL\t%s\t-\t-\t-\t-\t%s\n' "$L" "$BOOT_SECS" "$NOTE" >> "$RESULTS_FILE"
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v >>"$ITER_LOG" 2>&1 || true
+              ./container-down.sh >>"$ITER_LOG" 2>&1 || true
               OVERALL=1
               continue
             fi
 
             # Capture vLLM's startup log lines that describe KV cache sizing.
-            KV_LINE=$(docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color 2>/dev/null \
+            KV_LINE=$(docker compose logs --no-color 2>/dev/null \
               | grep -iE "kv.cache|GPU.*memory.*available|num_gpu_blocks|num_cpu_blocks" \
               | head -5 || true)
             echo "KV cache log lines:"
@@ -160,11 +149,11 @@ jobs:
 
             if [ "$CURL_RC" != "0" ] || [ -z "$RESP" ]; then
               echo "::warning::L=$L completion request failed (curl rc=$CURL_RC)"
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --tail 200 --no-color >> "$ITER_LOG" 2>&1 || true
+              docker compose logs --tail 200 --no-color >> "$ITER_LOG" 2>&1 || true
               NOTE="curl_rc=$CURL_RC"
               if grep -qiE "out of memory|cuda.*memory" "$ITER_LOG"; then NOTE="OOM_at_request"; fi
               printf '%s\tREQUEST_FAIL\t%s\t%s\t-\t-\t%s\t%s\n' "$L" "$BOOT_SECS" "$PREFILL_SECS" "$KV_TOKENS" "$NOTE" >> "$RESULTS_FILE"
-              docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v >>"$ITER_LOG" 2>&1 || true
+              ./container-down.sh >>"$ITER_LOG" 2>&1 || true
               OVERALL=1
               continue
             fi
@@ -177,8 +166,8 @@ jobs:
             echo "L=$L OK: boot=${BOOT_SECS}s prefill=${PREFILL_SECS}s prompt_tokens=$PROMPT_TOKENS kv_cache_tokens=$KV_TOKENS"
 
             # Save full container log for the artifact, then tear down.
-            docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color >> "$ITER_LOG" 2>&1 || true
-            docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v >>"$ITER_LOG" 2>&1 || true
+            docker compose logs --no-color >> "$ITER_LOG" 2>&1 || true
+            ./container-down.sh >>"$ITER_LOG" 2>&1 || true
           done
 
           echo ""
@@ -197,6 +186,10 @@ jobs:
             echo "::error::No context length succeeded — likely a runner/image issue, not a kernel finding."
             exit 1
           fi
+
+      - name: Restore GPU
+        if: always()
+        run: docker/k80/ci/gpu-restore.sh
 
       - name: Upload logs + results
         if: always()
