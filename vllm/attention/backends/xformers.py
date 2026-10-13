@@ -21,6 +21,7 @@ from vllm.attention.backends.utils import (
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -414,6 +415,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        # Below sm_53 CUTLASS converts every FP16 value in software, which
+        # makes the FP16 cutlassF kernel 6-7x slower than the FP32 one on a
+        # K80. Prefill attention runs in FP32 there; the KV cache stays FP16.
+        self.prefill_in_fp32 = not current_platform.has_device_capability(53)
+
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
             raise ValueError(
@@ -655,6 +661,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         """
 
         original_query = query
+        if self.prefill_in_fp32 and query.dtype == torch.float16:
+            # Cast before the GQA expand below, which only makes views.
+            query, key, value = query.float(), key.float(), value.float()
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].
             # Note that the output also has the same shape (which is different
@@ -746,7 +755,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 attn_bias=attn_bias[0],
                 p=0.0,
                 scale=self.scale)
-            return out.view_as(original_query)
+            return out.view_as(original_query).to(original_query.dtype)
 
         # Attention with alibi slopes.
         # FIXME(woosuk): Because xformers does not support dynamic sequence

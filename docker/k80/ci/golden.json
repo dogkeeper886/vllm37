@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden baseline for k80-runtime.yml smoke test. Regenerate by running k80-pipeline.yml with default inputs (Qwen/Qwen3-0.6B, TP=1, XFORMERS, prompt 'Hello', max_tokens=16, temperature=0), then copy the /v1/completions response fields from the runtime job logs into 'expected' below. Captured 2026-10-08 on the host build (tools/k80-host/serve.sh); confirmed by the CI run that merged it.",
+  "_comment": "Golden baseline for k80-runtime.yml smoke test. Regenerate by running k80-pipeline.yml with default inputs (Qwen/Qwen3-0.6B, TP=1, XFORMERS, prompt 'Hello', max_tokens=16, temperature=0), then copy the /v1/completions response fields from the runtime job logs into 'expected' below. Captured 2026-10-08 on the host build (tools/k80-host/serve.sh); confirmed by the CI run that merged it. dtype=half returns the same text on both attention backends (measured 2026-10-13), so one baseline serves both dtypes.",
   "applies_when": {
     "model": "Qwen/Qwen3-0.6B",
     "tp_size": "1",

@@ -24,6 +24,12 @@ on:
         default: "XFORMERS"
         type: choice
         options: [XFORMERS, TORCH_SDPA]
+      dtype:
+        description: "Weight and KV cache dtype (half = FP16 storage, FP32 math)"
+        required: false
+        default: "float32"
+        type: choice
+        options: [float32, half]
       builder_image:
         description: "Builder image to build on"
         required: false
@@ -46,4 +52,5 @@ jobs:
       tp_size: ${{ inputs.tp_size }}
       model: ${{ inputs.model }}
       attention_backend: ${{ inputs.attention_backend }}
+      dtype: ${{ inputs.dtype }}
       builder_image: ${{ inputs.builder_image }}

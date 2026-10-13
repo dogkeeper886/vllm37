@@ -20,6 +20,12 @@ on:
         required: false
         default: "Qwen/Qwen3-0.6B"
         type: string
+      dtype:
+        description: "Weight and KV cache dtype (half = FP16 storage, FP32 math)"
+        required: false
+        default: "float32"
+        type: choice
+        options: [float32, half]
       gpu_mem_util:
         description: "GPU memory utilization (vLLM default 0.85)"
         required: false
@@ -49,6 +55,7 @@ jobs:
     env:
       TP_SIZE: "1"
       MODEL: ${{ inputs.model || 'Qwen/Qwen3-0.6B' }}
+      DTYPE: ${{ inputs.dtype || 'float32' }}
       BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
       GPU_MEM_UTIL: ${{ inputs.gpu_mem_util || '0.85' }}
       TARGET_FILL: ${{ inputs.target_fill || '0.75' }}

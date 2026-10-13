@@ -19,6 +19,12 @@ on:
         default: "XFORMERS"
         type: choice
         options: [XFORMERS, TORCH_SDPA]
+      dtype:
+        description: "Weight and KV cache dtype (half = FP16 storage, FP32 math)"
+        required: false
+        default: "float32"
+        type: choice
+        options: [float32, half]
       k80_trace:
         description: "Enable VLLM_K80_TRACE=1 for TP-init hang diagnosis logs"
         required: false
@@ -42,6 +48,10 @@ on:
       attention_backend:
         required: false
         default: "XFORMERS"
+        type: string
+      dtype:
+        required: false
+        default: "float32"
         type: string
       k80_trace:
         required: false
@@ -71,6 +81,7 @@ jobs:
       TP_SIZE: ${{ inputs.tp_size || '1' }}
       MODEL: ${{ inputs.model || 'Qwen/Qwen3-0.6B' }}
       VLLM_ATTENTION_BACKEND: ${{ inputs.attention_backend || 'XFORMERS' }}
+      DTYPE: ${{ inputs.dtype || 'float32' }}
       VLLM_K80_TRACE: ${{ inputs.k80_trace || '1' }}
       BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
       VLLM_LOG_DIR: /tmp/k80-ci-logs
@@ -101,7 +112,7 @@ jobs:
 
       - name: Start vLLM container
         run: |
-          echo "Starting vLLM: TP_SIZE=$TP_SIZE MODEL=$MODEL VLLM_ATTENTION_BACKEND=$VLLM_ATTENTION_BACKEND VLLM_K80_TRACE=$VLLM_K80_TRACE"
+          echo "Starting vLLM: TP_SIZE=$TP_SIZE MODEL=$MODEL DTYPE=$DTYPE VLLM_ATTENTION_BACKEND=$VLLM_ATTENTION_BACKEND VLLM_K80_TRACE=$VLLM_K80_TRACE"
           if ! docker/k80/container-up.sh 600; then
             echo "::error::Server did not become ready."
             exit 1
