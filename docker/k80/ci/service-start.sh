@@ -38,6 +38,10 @@ case "$TP_SIZE" in 1|2) ;; *) echo "service-start: TP_SIZE must be 1 or 2, got '
 export VLLM_K80_TRACE=${VLLM_K80_TRACE:-$([ "$TP_SIZE" -gt 1 ] && echo 1 || echo 0)}
 
 BUILD=$("$HERE/runtime.sh" "$SERVER" commit)
+# A unit left by a killed local run would still hold the cards and port 8000,
+# whichever kind of server starts now. gpu-yield.sh does the same for a container.
+systemctl --user stop "$UNIT" 2>/dev/null || true
+systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 "$HERE/gpu-yield.sh"
 
 if [ "$SERVER" = docker ]; then
@@ -45,8 +49,6 @@ if [ "$SERVER" = docker ]; then
 else
   # The dies the container takes: the first TP_SIZE of board A.
   DEVICES=$([ "$TP_SIZE" -gt 1 ] && echo 0,1 || echo 0)
-  systemctl --user stop "$UNIT" 2>/dev/null || true
-  systemctl --user reset-failed "$UNIT" 2>/dev/null || true
   : > "$LOCAL_LOG"
   systemd-run --user --unit="$UNIT" --collect --quiet \
     --setenv=MODEL="$MODEL" --setenv=DTYPE="$DTYPE" --setenv=TP_SIZE="$TP_SIZE" \
