@@ -5,7 +5,7 @@
 #   make build-builder    # Build the builder image (~120 min first time)
 #   make build-local      # Build the runtime image from this checkout
 #   make build-all-local  # Build builder + runtime
-#   make run              # Run with docker compose
+#   make run              # Start the vllm37 container, wait until it serves
 #   make clean            # Remove images
 
 -include .env
@@ -13,13 +13,9 @@
 BUILDER_IMAGE  ?= vllm37-builder
 RUNTIME_LOCAL  ?= vllm37-local
 JOBS           ?= 4
-# Host dir bind-mounted into the container at /var/log/vllm for vllm + NCCL
-# logs. Must exist and be writable before `docker compose up` — otherwise
-# Docker auto-creates it as root-owned and NCCL_DEBUG_FILE silently fails.
-VLLM_LOG_DIR   ?= /tmp/vllm-logs
 REPO_ROOT      := $(shell git rev-parse --show-toplevel 2>/dev/null || echo ../..)
 
-.PHONY: help build-builder build-local build-local-no-cache build-all-local log-dir run stop logs clean verify-cutlass-patches verify-xformers-patches
+.PHONY: help build-builder build-local build-local-no-cache build-all-local run stop logs clean verify-cutlass-patches verify-xformers-patches
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -54,15 +50,11 @@ build-local-no-cache: ## Build runtime image from local source (no layer cache)
 
 build-all-local: build-builder build-local ## Build builder + runtime (local source)
 
-log-dir: ## Ensure VLLM_LOG_DIR exists (bind-mount target for vllm + NCCL logs)
-	@mkdir -p $(VLLM_LOG_DIR)
-	@chmod 777 $(VLLM_LOG_DIR)
+run: ## Start the vllm37 container and wait until it serves
+	./container-up.sh
 
-run: log-dir ## Start vLLM server via docker compose
-	VLLM_LOG_DIR=$(VLLM_LOG_DIR) docker compose up -d
-
-stop: ## Stop vLLM server
-	docker compose down
+stop: ## Stop and remove the vllm37 container
+	./container-down.sh
 
 logs: ## Show vLLM server logs
 	docker compose logs -f
