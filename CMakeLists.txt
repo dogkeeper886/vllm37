@@ -295,6 +295,12 @@ if(VLLM_BUILD_LEGACY_CUDA)
     "csrc/quantization/gguf/gguf_kernel.cu")
 endif()
 
+# K80 fork (#74): int4 kernels for Kepler. Plain CUDA (no CUTLASS, no half
+# math), so every CUDA build has them, the legacy one included.
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_EXT_SRC "csrc/quantization/k80/int4.cu")
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" AND NOT VLLM_BUILD_LEGACY_CUDA)
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 

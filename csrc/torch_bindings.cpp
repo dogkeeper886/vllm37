@@ -609,6 +609,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 #endif
 
+#ifndef USE_ROCM
+  // K80 fork (#74): int4 weight-only product and dequantize for Kepler, in
+  // the layout K80Int4LinearKernel repacks int4 checkpoints into.
+  ops.def(
+      "k80_int4_gemm(Tensor x, Tensor qweight, Tensor scales, Tensor zeros) "
+      "-> Tensor");
+  ops.impl("k80_int4_gemm", torch::kCUDA, &k80_int4_gemm);
+  ops.def(
+      "k80_int4_dequantize(Tensor! out, Tensor qweight, Tensor scales, "
+      "Tensor zeros) -> ()");
+  ops.impl("k80_int4_dequantize", torch::kCUDA, &k80_int4_dequantize);
+#endif
+
 #if !defined(VLLM_BUILD_LEGACY_CUDA)
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(

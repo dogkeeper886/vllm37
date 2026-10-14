@@ -82,7 +82,7 @@ Official vLLM enforces `get_min_capability()` at `vllm/config/vllm.py:943`.
 | MXFP4 (gpt-oss, Granite) | `Mxfp4Config` | 80 | `mxfp4.py:67-77` |
 | GGUF | moved out of official main (vllm-gguf-plugin); fork's GGUF needs 60 | — | Parts 4, 7; `vllm37:gguf.py:43`; issues #73, #74 |
 
-**So on K80 the format today is BF16 safetensors, loaded as FP32 (or FP16 storage, if the fork's kernels allow it; see 1.1).** The refusal is about kernels, not the formats themselves: Part 9 gives the exact instruction each kernel needs and a measured K80 int4 workaround.
+**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74); GGUF is #107. Everything else is BF16 safetensors, loaded as FP32 or FP16.
 
 ### 1.5 Ranking by porting cost
 
@@ -1722,24 +1722,26 @@ When the hardware lacks a unit, rewrite the work as FP32 FMA and 32-bit integer 
 - **Group the scale:** accumulate `Σ (q − z) · x` per 8-weight word, then multiply by the group scale once.
 - **Repack at load time:** convert GPTQ / AWQ / compressed-tensors / GGUF Q4 checkpoints into this layout once, the way Marlin repacks for its kernel. One kernel then serves every weight-only int4 format.
 
-### 9.4 Measured on this host
+### 9.4 What the fork runs (#73, #74)
 
-Prototype: `docs/port/k80-int4-gemv-proto.cu` (one warp per output row, `x` in shared memory, group 128). Built with `nvcc -O3 -arch=sm_37`, run on GPU0, 200 iterations each, compared against `cublasSgemv` on the same weights dequantized to FP32. **[measured]**
+- **Layout (#73):** `K80Int4LinearKernel` (`kernels/mixed_precision/k80.py`) repacks compressed-tensors, GPTQ and AWQ int4 checkpoints at load into `qweight` int32 `[N, K/8]` plus FP32 scales and zeros per group.
+- **Kernels (#74):** `csrc/quantization/k80/int4.cu`. `k80_int4_gemm` serves up to 48 rows. One warp computes 4 or 8 output features. Each lane reads 1–4 packed words of every feature in one load, decodes each value with one `__byte_perm` into the mantissa of 2^23, and multiply-adds in FP32 against inputs held in registers (ollama37's `mmvq-k80.cu` shape). Above 48 rows, `k80_int4_dequantize` writes the weight in the activation dtype, bit for bit what the PyTorch reference gives, and cuBLAS multiplies.
+- **Read ceiling (plain `uint4` read kernel, each die, 875 MHz):** 157–159 GB/s read, 157 GB/s write, 140 GB/s copy.
 
-| Shape (N × K) | cuBLAS FP32 GEMV | int4, mantissa-trick unpack | int4, int→float unpack | Max rel. error vs FP32 |
+Measured on one die (GPU1), group 128, against a float64 product. **[measured]**
+
+| Shape (N × K) | FP32 cuBLAS, 1 row | `k80_int4_gemm`, 1 row | Packed read | Dequantize FP32 / FP16 |
 |---|---|---|---|---|
-| 4096 × 4096 | 597.5 µs (112 GB/s) | 209.1 µs (**2.86×**) | 211.0 µs (2.83×) | 5.0e-4 |
-| 11008 × 4096 | 1242.9 µs (145 GB/s) | 438.2 µs (2.84×) | 407.3 µs (**3.05×**) | 2.4e-3 |
-| 4096 × 11008 | 1510.7 µs (119 GB/s) | 757.9 µs (**1.99×**) | 784.8 µs (1.92×) | 5.2e-4 |
+| 4096 × 4096 | 412 µs | 90 µs (4.6×) | 106 GB/s | 150 / 152 GB/s |
+| 11008 × 4096 | 1,074 µs | 223 µs (4.8×) | 114 GB/s | 150 / 153 GB/s |
+| 4096 × 11008 | 1,329 µs | 239 µs (5.6×) | 106 GB/s | 150 / 152 GB/s |
 
-What the numbers say:
-- A first, unoptimized kernel is already **2–3× faster than FP32 cuBLAS** for single-token decode, using **8× less weight memory**. The error comes from FP32 summation order.
-- It reads packed data at only 33–62 GB/s, against the die's ~240 GB/s, so it is limited by instruction issue, not memory. The ceiling for a 4-bit layout is up to ~8× over FP32. Tiling, more weights per load, and keeping `x` in registers are the next steps.
-- The two unpack methods are within noise of each other. The unpack instruction is not the bottleneck yet.
-- The K = 11008 case uses 44 KB of shared memory per block for `x`, which limits occupancy. That explains why it is the slowest case.
+- **Error:** relative 1.6–2.7e-7 in FP32 (the PyTorch reference path: 1.3e-7), 2e-4 in FP16 (reference 3.5e-4).
+- **Batch:** at 2–8 rows `k80_int4_gemm` beats dequantize + GEMM by 3.4–11×. Run in chunks of 8 rows, it still wins up to 48 rows, and loses from 64.
+- **Dropped:** one warp per row (the prototype's shape) read 54–71 GB/s. FP32 dequantize with 32-byte stores per thread read 92 GB/s; two threads per word with one `float4` each reach 150. FP16 dequantize with the generic two-rounding path read 125 GB/s; when the zero is a whole number, `q − z` is exact in half, and skipping that rounding reaches 152.
 
-### 9.5 Consequence for the plan
+### 9.5 What is left
 
-- #73: load weight-only int4 checkpoints (GPTQ / AWQ / compressed-tensors / GGUF Q4) and repack them to the K80 layout. A dequantize-to-FP32 path is the correctness reference.
-- #74: the fused K80 kernel (GEMV for decode, a tiled GEMM for prefill) built on 9.3, replacing the narrower "software dp4a" plan.
-- The same rule extends to int8 (4 per word) and to FP8 / FP4 weights decoded by bit operations, which unlocks those checkpoints as weight-only formats.
+- GGUF Q4 checkpoints (#107).
+- An int8 (4 per word) variant: no int8 weight-only checkpoint reaches `K80Int4LinearKernel` yet.
+- FP8 / FP4 weights decoded by bit operations, as weight-only formats.

@@ -13,14 +13,20 @@
 #   zeros    fp32  [N, K / group_size]  w = (q - zero) * scale
 #   perm     int64 [K] or absent        act-order (g_idx) resolved at load by
 #                                       permuting K, so groups are contiguous
-# Each forward dequantizes the layer's weights to the activation dtype and
-# multiplies with cuBLAS. That is the reference path, and the prefill path
-# once #74 adds a fused decode kernel that reads the same layout.
+# Forward (#74), with the K80 CUDA kernels in csrc/quantization/k80/int4.cu:
+#   up to K80_INT4_GEMM_MAX_ROWS rows (decode)  k80_int4_gemm, which reads the
+#       packed words and multiply-adds in FP32 (no dequantized copy)
+#   more rows (prefill)  k80_int4_dequantize into the activation dtype, then
+#       the unquantized GEMM (cuBLAS)
+# k80_int4_dequantize() below is the PyTorch reference: the path when the
+# kernels are missing or VLLM_K80_INT4_KERNEL=0, and the kernels' test oracle.
 
 from typing import Optional
 
 import torch
 
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -29,10 +35,15 @@ from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
+logger = init_logger(__name__)
+
 # The quantization methods whose int4 layers reach this kernel.
 K80_INT4_METHODS = ("compressed-tensors", "gptq_marlin", "awq_marlin")
 # AWQ packs along N; value i of a word is feature AWQ_PACK_ORDER[i] of its 8.
 AWQ_PACK_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
+# Above this many rows dequantize + cuBLAS beats k80_int4_gemm: on a K80 die
+# the crossover is between 48 and 64 rows for 1024-11008 features (#74).
+K80_INT4_GEMM_MAX_ROWS = 48
 
 
 def on_kepler() -> bool:
@@ -166,6 +177,16 @@ class K80Int4LinearKernel(MPLinearKernel):
         layer.k80_perm = perm
         self._gemm = dispatch_unquantized_gemm()
 
+        from vllm import _custom_ops as ops
+        self._ops = ops if (envs.VLLM_K80_INT4_KERNEL and hasattr(
+            torch.ops._C, "k80_int4_gemm") and group_size % 8 == 0) else None
+        logger.info_once(
+            "K80 int4 layers use %s",
+            "the K80 CUDA kernels" if self._ops is not None else
+            "the PyTorch reference path (slow; VLLM_K80_INT4_KERNEL=0, a "
+            "build without csrc/quantization/k80, or a group size that is "
+            "not a multiple of 8)")
+
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
@@ -174,7 +195,21 @@ class K80Int4LinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, k)
         if layer.k80_perm is not None:
             x_2d = x_2d.index_select(1, layer.k80_perm)
-        weight = k80_int4_dequantize(layer.k80_qweight, layer.k80_scales,
-                                     layer.k80_zeros, x.dtype)
-        out = self._gemm(layer, x_2d, weight, bias)
+        if self._ops is None:
+            weight = k80_int4_dequantize(layer.k80_qweight, layer.k80_scales,
+                                         layer.k80_zeros, x.dtype)
+            out = self._gemm(layer, x_2d, weight, bias)
+        elif x_2d.shape[0] <= K80_INT4_GEMM_MAX_ROWS:
+            x_2d = x_2d.contiguous()
+            if x_2d.data_ptr() % 16:
+                x_2d = x_2d.clone()
+            out = self._ops.k80_int4_gemm(x_2d, layer.k80_qweight,
+                                          layer.k80_scales, layer.k80_zeros)
+            if bias is not None:
+                out.add_(bias)
+        else:
+            weight = torch.empty((n, k), dtype=x.dtype, device=x.device)
+            self._ops.k80_int4_dequantize(weight, layer.k80_qweight,
+                                          layer.k80_scales, layer.k80_zeros)
+            out = self._gemm(layer, x_2d, weight, bias)
         return out.reshape(x.shape[:-1] + (n, ))

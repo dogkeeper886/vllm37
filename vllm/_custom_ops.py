@@ -424,6 +424,26 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
+# K80 fork (#74): int4 kernels for Kepler, in the K80Int4LinearKernel layout.
+def k80_int4_gemm(x: torch.Tensor, qweight: torch.Tensor,
+                  scales: torch.Tensor, zeros: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.k80_int4_gemm(x, qweight, scales, zeros)
+
+
+def k80_int4_dequantize(out: torch.Tensor, qweight: torch.Tensor,
+                        scales: torch.Tensor, zeros: torch.Tensor) -> None:
+    torch.ops._C.k80_int4_dequantize(out, qweight, scales, zeros)
+
+
+if hasattr(torch.ops._C, "k80_int4_gemm"):
+
+    @register_fake("_C::k80_int4_gemm")
+    def _k80_int4_gemm_fake(x: torch.Tensor, qweight: torch.Tensor,
+                            scales: torch.Tensor,
+                            zeros: torch.Tensor) -> torch.Tensor:
+        return x.new_empty((x.size(0), qweight.size(0)))
+
+
 # marlin
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
