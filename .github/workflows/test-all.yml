@@ -1,0 +1,342 @@
+name: "Test: all"
+
+# The five tests one after another from one dispatch, to check one change. The
+# change is whatever the server serves: the image on the runner (server docker,
+# built from this run's commit when `build` is on) or the host build's working
+# tree as it is, uncommitted edits included (server local). Dispatch it on any
+# branch or on main; the summary names the build each test served.
+#
+# Each test has the inputs it varies; `dtype` and `dies` set the server of every
+# test but the one that varies them. Values come from the Run form, else the
+# repository variable, else the value written here as a last resort. The run
+# never writes a repository variable.
+#
+# Each test job takes the cards under the k80-hardware lock and gives them back
+# itself. A failed test does not stop the next one; a cancel stops the rest.
+# The test-*.yml files stay the way to run one test on its own.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: "Tests to run, comma separated: request-length, concurrent-calls, arrival, die-count, weight-dtype; they run in that order (empty = all)"
+        default: ""
+        type: string
+      build:
+        description: "Build the docker image from this run's commit before the tests (server docker only)"
+        default: false
+        type: boolean
+      server:
+        description: "Build to serve: docker = the image on the runner, local = the host build's working tree (empty = repository variable TEST_SERVER)"
+        default: ""
+        type: string
+      model:
+        description: "Hugging Face model id for every test (empty = repository variable TEST_MODEL)"
+        default: ""
+        type: string
+      max_model_len:
+        description: "Context length in tokens for every test (empty = repository variable TEST_MAX_MODEL_LEN)"
+        default: ""
+        type: string
+      dtype:
+        description: "Weight dtype for every test but weight dtype (empty = float32)"
+        default: ""
+        type: string
+      dies:
+        description: "Dies (tensor parallel size) for every test but die count (empty = 1)"
+        default: ""
+        type: string
+      request_length_prompt:
+        description: "Request length: prompt names from prompts.yaml, comma separated (empty = repository variable TEST_PROMPTS)"
+        default: ""
+        type: string
+      concurrent_calls:
+        description: "Concurrent calls: call counts, comma separated (empty = repository variable TEST_CALLS)"
+        default: ""
+        type: string
+      arrival_calls:
+        description: "Arrival: how many calls arrive (empty = repository variable TEST_ARRIVAL_CALLS)"
+        default: ""
+        type: string
+      arrival_stagger:
+        description: "Arrival: token counts, comma separated; 0 sends the calls together (empty = repository variable TEST_STAGGER)"
+        default: ""
+        type: string
+      die_count:
+        description: "Die count: die counts, comma separated; one job each (empty = repository variable TEST_DIES)"
+        default: ""
+        type: string
+      weight_dtype:
+        description: "Weight dtype: dtypes, comma separated; one job each (empty = repository variable TEST_DTYPES)"
+        default: ""
+        type: string
+
+jobs:
+  # Every value the tests take, settled once and written to the summary.
+  plan:
+    name: plan
+    runs-on: [self-hosted, vllm]
+    timeout-minutes: 5
+    outputs:
+      request_length: ${{ steps.plan.outputs.request_length }}
+      concurrent_calls: ${{ steps.plan.outputs.concurrent_calls }}
+      arrival: ${{ steps.plan.outputs.arrival }}
+      die_count: ${{ steps.plan.outputs.die_count }}
+      weight_dtype: ${{ steps.plan.outputs.weight_dtype }}
+      server: ${{ steps.plan.outputs.server }}
+      model: ${{ steps.plan.outputs.model }}
+      max_model_len: ${{ steps.plan.outputs.max_model_len }}
+      dtype: ${{ steps.plan.outputs.dtype }}
+      dies: ${{ steps.plan.outputs.dies }}
+      prompt: ${{ steps.plan.outputs.prompt }}
+      calls: ${{ steps.plan.outputs.calls }}
+      arrival_calls: ${{ steps.plan.outputs.arrival_calls }}
+      stagger: ${{ steps.plan.outputs.stagger }}
+      die_counts: ${{ steps.plan.outputs.die_counts }}
+      dtypes: ${{ steps.plan.outputs.dtypes }}
+    steps:
+      - id: plan
+        env:
+          TESTS: ${{ inputs.tests }}
+          BUILD: ${{ inputs.build }}
+          SERVER: ${{ inputs.server || vars.TEST_SERVER }}
+          MODEL: ${{ inputs.model || vars.TEST_MODEL }}
+          MAX_MODEL_LEN: ${{ inputs.max_model_len || vars.TEST_MAX_MODEL_LEN }}
+          DTYPE: ${{ inputs.dtype || 'float32' }}
+          DIES: ${{ inputs.dies || '1' }}
+          PROMPT: ${{ inputs.request_length_prompt || vars.TEST_PROMPTS || 'speech-rewrite,farewell-summary' }}
+          CALLS: ${{ inputs.concurrent_calls || vars.TEST_CALLS || '1,2' }}
+          ARRIVAL_CALLS: ${{ inputs.arrival_calls || vars.TEST_ARRIVAL_CALLS || '2' }}
+          STAGGER: ${{ inputs.arrival_stagger || vars.TEST_STAGGER || '0,20' }}
+          DIE_COUNTS: ${{ inputs.die_count || vars.TEST_DIES || '1,2' }}
+          DTYPES: ${{ inputs.weight_dtype || vars.TEST_DTYPES || 'float32,half' }}
+        run: |
+          set -euo pipefail
+          ALL="request-length concurrent-calls arrival die-count weight-dtype"
+          TESTS=${TESTS// /}
+          TESTS=${TESTS:-${ALL// /,}}
+          for t in ${TESTS//,/ }; do
+            case " $ALL " in
+              *" $t "*) ;;
+              *) echo "::error::tests: no test is named '$t'; the tests are ${ALL// /, }"; exit 1 ;;
+            esac
+          done
+          case "${SERVER:-docker}" in
+            docker|local) ;;
+            *) echo "::error::server must be docker or local, got '$SERVER'"; exit 1 ;;
+          esac
+          if [ "$BUILD" = true ] && [ "$SERVER" = local ]; then
+            echo "::error::build makes the docker image, and server local does not serve it; build the host with tools/k80-host/setup.sh"
+            exit 1
+          fi
+          # "1, 2" -> ["1","2"], for a matrix.
+          json() { local out="" v; for v in ${1//,/ }; do out+="${out:+,}\"$v\""; done; echo "[$out]"; }
+          {
+            for t in $ALL; do
+              case ",$TESTS," in *",$t,"*) echo "${t//-/_}=true" ;; *) echo "${t//-/_}=false" ;; esac
+            done
+            echo "server=$SERVER"
+            echo "model=$MODEL"
+            echo "max_model_len=$MAX_MODEL_LEN"
+            echo "dtype=$DTYPE"
+            echo "dies=$DIES"
+            echo "prompt=$PROMPT"
+            echo "calls=$CALLS"
+            echo "arrival_calls=$ARRIVAL_CALLS"
+            echo "stagger=$STAGGER"
+            echo "die_counts=$(json "$DIE_COUNTS")"
+            echo "dtypes=$(json "$DTYPES")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Plan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tests | ${TESTS//,/, } |"
+            echo "| Build first | $BUILD |"
+            echo "| Server | ${SERVER:-docker (default)} |"
+            echo "| Model | ${MODEL:-default in service-start.sh} |"
+            echo "| Context | ${MAX_MODEL_LEN:-default in service-start.sh} |"
+            echo "| dtype, dies | $DTYPE, $DIES |"
+            echo "| request-length | prompt=$PROMPT |"
+            echo "| concurrent-calls | calls=$CALLS |"
+            echo "| arrival | calls=$ARRIVAL_CALLS, stagger=$STAGGER |"
+            echo "| die-count | dies=$DIE_COUNTS |"
+            echo "| weight-dtype | dtype=$DTYPES |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Only when asked: a run never builds unasked. It takes the k80-hardware lock
+  # itself, so it does not overlap a test.
+  build:
+    needs: plan
+    if: ${{ inputs.build }}
+    uses: ./.github/workflows/k80-build.yml
+
+  request-length:
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.request_length == 'true' }}
+    name: request-length
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: request-length
+          prompt: ${{ needs.plan.outputs.prompt }}
+          server: ${{ needs.plan.outputs.server }}
+          model: ${{ needs.plan.outputs.model }}
+          max_model_len: ${{ needs.plan.outputs.max_model_len }}
+          dtype: ${{ needs.plan.outputs.dtype }}
+          dies: ${{ needs.plan.outputs.dies }}
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  concurrent-calls:
+    needs: [plan, build, request-length]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.concurrent_calls == 'true' }}
+    name: concurrent-calls
+    runs-on: [self-hosted, vllm]
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: concurrent-calls
+          calls: ${{ needs.plan.outputs.calls }}
+          server: ${{ needs.plan.outputs.server }}
+          model: ${{ needs.plan.outputs.model }}
+          max_model_len: ${{ needs.plan.outputs.max_model_len }}
+          dtype: ${{ needs.plan.outputs.dtype }}
+          dies: ${{ needs.plan.outputs.dies }}
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  arrival:
+    needs: [plan, build, concurrent-calls]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.arrival == 'true' }}
+    name: arrival
+    runs-on: [self-hosted, vllm]
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: arrival
+          calls: ${{ needs.plan.outputs.arrival_calls }}
+          stagger: ${{ needs.plan.outputs.stagger }}
+          server: ${{ needs.plan.outputs.server }}
+          model: ${{ needs.plan.outputs.model }}
+          max_model_len: ${{ needs.plan.outputs.max_model_len }}
+          dtype: ${{ needs.plan.outputs.dtype }}
+          dies: ${{ needs.plan.outputs.dies }}
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  die-count:
+    needs: [plan, build, arrival]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.die_count == 'true' }}
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        dies: ${{ fromJSON(needs.plan.outputs.die_counts) }}
+    name: die-count (${{ matrix.dies }} die)
+    runs-on: [self-hosted, vllm]
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: die-count
+          dies: ${{ matrix.dies }}
+          server: ${{ needs.plan.outputs.server }}
+          model: ${{ needs.plan.outputs.model }}
+          max_model_len: ${{ needs.plan.outputs.max_model_len }}
+          dtype: ${{ needs.plan.outputs.dtype }}
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  weight-dtype:
+    needs: [plan, build, die-count]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.weight_dtype == 'true' }}
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        dtype: ${{ fromJSON(needs.plan.outputs.dtypes) }}
+    name: weight-dtype (${{ matrix.dtype }})
+    runs-on: [self-hosted, vllm]
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: weight-dtype
+          dtype: ${{ matrix.dtype }}
+          server: ${{ needs.plan.outputs.server }}
+          model: ${{ needs.plan.outputs.model }}
+          max_model_len: ${{ needs.plan.outputs.max_model_len }}
+          dies: ${{ needs.plan.outputs.dies }}
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  # One table over every test's report. No cards: it only reads the reports.
+  summary:
+    needs: [plan, build, request-length, concurrent-calls, arrival, die-count, weight-dtype]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    name: summary
+    runs-on: [self-hosted, vllm]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/setup-tests
+      # No report at all (every test skipped) is not an error here.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: "*-report"
+          path: docker/k80/ci/tests/reports
+      - name: Summary
+        working-directory: docker/k80/ci/tests
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: npx tsx summary.ts --input reports
