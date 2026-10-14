@@ -42,6 +42,8 @@ inputs:
 runs:
   using: composite
   steps:
+    # Each step below states its condition: the steps before it passed and the
+    # run is not cancelled. Nothing starts once a cancel has arrived.
     # For test-end, which runs whatever happens below.
     - shell: bash
       env:
@@ -51,18 +53,23 @@ runs:
         echo "TEST_NAME=$TEST" >> "$GITHUB_ENV"
         echo "TEST_REPORT=$REPORT" >> "$GITHUB_ENV"
     - uses: ./.github/actions/identify-host
+      if: ${{ success() && !cancelled() }}
     - uses: ./.github/actions/setup-tests
+      if: ${{ success() && !cancelled() }}
     - name: Runtime
+      if: ${{ success() && !cancelled() }}
       shell: bash
       env:
         SERVER: ${{ inputs.server }}
       run: docker/k80/ci/runtime.sh "$SERVER"
     # Before the GPUs are taken: a run with no judge would test nothing.
     - name: Judge ready
+      if: ${{ success() && !cancelled() }}
       shell: bash
       working-directory: docker/k80/ci/tests
       run: npx tsx report.ts --ready
     - name: Service start
+      if: ${{ success() && !cancelled() }}
       shell: bash
       env:
         SERVER: ${{ inputs.server }}
@@ -72,6 +79,7 @@ runs:
         MAX_MODEL_LEN: ${{ inputs.max_model_len }}
       run: docker/k80/ci/service-start.sh "$SERVER"
     - name: Test
+      if: ${{ success() && !cancelled() }}
       shell: bash
       working-directory: docker/k80/ci/tests
       env:

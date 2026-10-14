@@ -10,6 +10,7 @@ runs:
   using: composite
   steps:
     - name: Service stop
+      if: always()
       shell: bash
       run: docker/k80/ci/service-stop.sh
     - name: Judge and report
