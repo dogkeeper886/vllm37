@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.dynamic_4bi
     Dynamic4bitLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (  # noqa: E501
     ExllamaLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+    K80Int4LinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (  # noqa: E501
     MacheteLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (  # noqa: E501
@@ -31,6 +33,7 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     BitBLASLinearKernel,
     ConchLinearKernel,
     ExllamaLinearKernel,
+    K80Int4LinearKernel,  # K80 fork (#73): Kepler only
 ]
 
 

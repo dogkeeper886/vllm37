@@ -19,6 +19,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+    on_kepler)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override, get_linear_quant_method, override_config)
@@ -215,6 +217,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         if (num_bits, sym) not in cls.TYPE_MAP:
             return False
 
+        # K80 fork (#73): Kepler runs symmetric int4 through
+        # K80Int4LinearKernel, by way of this method.
+        if on_kepler():
+            return num_bits == 4
+
         return check_marlin_supported(quant_type=cls.TYPE_MAP[(num_bits, sym)],
                                       group_size=group_size)
 
@@ -232,8 +239,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
 
         # Verify supported on platform.
-        verify_marlin_supported(quant_type=self.quant_config.quant_type,
-                                group_size=self.quant_config.group_size)
+        if not on_kepler():  # K80 fork (#73): K80Int4LinearKernel instead
+            verify_marlin_supported(quant_type=self.quant_config.quant_type,
+                                    group_size=self.quant_config.group_size)
 
     def create_weights(
         self,

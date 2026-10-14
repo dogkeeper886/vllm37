@@ -3885,10 +3885,18 @@ class VllmConfig:
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import (
                 get_quant_config)
+            from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+                K80_INT4_METHODS, on_kepler)
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
+            # K80 fork (#73): int4 weight-only checkpoints run on Kepler in
+            # float32 or float16 through K80Int4LinearKernel.
+            k80_int4 = (model_config.quantization in K80_INT4_METHODS
+                        and on_kepler()
+                        and model_config.dtype in (torch.float32,
+                                                   torch.float16))
 
-            if capability_tuple is not None:
+            if capability_tuple is not None and not k80_int4:
                 capability = capability_tuple.to_int()
                 if capability < quant_config.get_min_capability():
                     raise ValueError(
@@ -3897,7 +3905,7 @@ class VllmConfig:
                         f"capability: {quant_config.get_min_capability()}. "
                         f"Current capability: {capability}.")
             supported_dtypes = quant_config.get_supported_act_dtypes()
-            if model_config.dtype not in supported_dtypes:
+            if model_config.dtype not in supported_dtypes and not k80_int4:
                 raise ValueError(
                     f"{model_config.dtype} is not supported for quantization "
                     f"method {model_config.quantization}. Supported dtypes: "
