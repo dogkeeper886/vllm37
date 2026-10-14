@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+    on_kepler)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks)
 # yapf conflicts with isort for this block
@@ -67,6 +69,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        # K80 fork (#73): Kepler runs int4 through K80Int4LinearKernel.
+        if on_kepler():
+            return 30
         # ampere and up
         return 80
 

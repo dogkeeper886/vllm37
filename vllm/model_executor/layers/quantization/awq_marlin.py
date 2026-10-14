@@ -19,6 +19,10 @@ from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
+    MPLinearLayerConfig)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+    AWQ_PACK_ORDER, K80Int4LinearKernel, on_kepler)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
@@ -64,9 +68,10 @@ class AWQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[self.weight_bits]
 
-        verify_marlin_supported(self.quant_type,
-                                group_size=self.group_size,
-                                has_zp=self.zero_point)
+        if not on_kepler():  # K80 fork (#73): K80Int4LinearKernel instead
+            verify_marlin_supported(self.quant_type,
+                                    group_size=self.group_size,
+                                    has_zp=self.zero_point)
 
     def __repr__(self) -> str:
         return (f"AWQMarlinConfig(quant_type={self.quant_type}, "
@@ -130,7 +135,8 @@ class AWQMarlinConfig(QuantizationConfig):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
             # Check if the layer is supported by AWQMarlin.
-            if not check_marlin_supports_layer(layer, self.group_size):
+            if not on_kepler() and not check_marlin_supports_layer(
+                    layer, self.group_size):
                 logger.warning_once(
                     "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
                     prefix,
@@ -171,6 +177,11 @@ class AWQMarlinConfig(QuantizationConfig):
         if num_bits not in cls.TYPE_MAP:
             return False
 
+        # K80 fork (#73): Kepler runs int4 with zero points through
+        # K80Int4LinearKernel, by way of this method.
+        if on_kepler():
+            return num_bits == 4 and zero_point
+
         return check_marlin_supported(quant_type=cls.TYPE_MAP[num_bits],
                                       group_size=group_size,
                                       has_zp=zero_point)
@@ -185,6 +196,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AWQMarlinConfig) -> None:
         self.quant_config = quant_config
+        self.k80_kernel: Optional[K80Int4LinearKernel] = None
 
     def create_weights(
         self,
@@ -196,7 +208,6 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        del output_size
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -206,11 +217,33 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         else:
             group_size = input_size
 
-        verify_marlin_supports_shape(
-            output_size_per_partition=output_size_per_partition,
-            input_size_per_partition=input_size_per_partition,
-            input_size=input_size,
-            group_size=group_size)
+        if on_kepler():
+            # K80 fork (#73): the same checkpoint tensors, repacked at load.
+            c = MPLinearLayerConfig(
+                full_weight_shape=(input_size, output_size),
+                partition_weight_shape=(input_size_per_partition,
+                                        output_size_per_partition),
+                weight_type=self.quant_config.quant_type,
+                act_type=params_dtype,
+                group_size=self.quant_config.group_size,
+                zero_points=True,
+                has_g_idx=False)
+            ok, reason = K80Int4LinearKernel.can_implement(c)
+            if not ok:
+                raise ValueError(f"AWQ layer not supported on K80: {reason}")
+            self.k80_kernel = K80Int4LinearKernel(c,
+                                                  w_q_param_name="qweight",
+                                                  w_s_param_name="scales",
+                                                  w_zp_param_name="qzeros")
+            self.k80_kernel.pack_order = AWQ_PACK_ORDER
+            logger.info_once(
+                "Using K80Int4LinearKernel for AWQMarlinLinearMethod")
+        else:
+            verify_marlin_supports_shape(
+                output_size_per_partition=output_size_per_partition,
+                input_size_per_partition=input_size_per_partition,
+                input_size=input_size,
+                group_size=group_size)
 
         qweight = PackedvLLMParameter(
             data=torch.empty(
@@ -260,6 +293,9 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     # marlin format. This function is called after the weights are loaded.
     # Here, we handle the repacking
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.k80_kernel is not None:
+            self.k80_kernel.process_weights_after_loading(layer)
+            return
         device = layer.qweight.device
         layer.qweight = torch.nn.Parameter(layer.qweight.data,
                                            requires_grad=False)
@@ -305,6 +341,8 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.k80_kernel is not None:
+            return self.k80_kernel.apply_weights(layer, x, bias)
         return apply_awq_marlin_linear(
             input=x,
             weight=layer.qweight,
