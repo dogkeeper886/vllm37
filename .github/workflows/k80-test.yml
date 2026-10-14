@@ -37,10 +37,9 @@ on:
         type: choice
         options: ["float32", "half"]
       dies:
-        description: "Dies (tensor parallel size). Never more than 2: four have halted this machine"
+        description: "Dies (tensor parallel size): any count the host has, GPU0 first"
         default: "1"
-        type: choice
-        options: ["1", "2"]
+        type: string
       max_model_len:
         description: "Context length in tokens"
         default: "12288"
