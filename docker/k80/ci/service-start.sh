@@ -9,7 +9,8 @@
 #            not touched.
 # Env (the defaults are the first row of the use-case table):
 #   MODEL           Hugging Face model id (default Qwen/Qwen3-0.6B)
-#   DTYPE           float32 or half (default float32)
+#   DTYPE           weight dtype, such as float32 or half (default float32);
+#                   vLLM says which names it takes
 #   TP_SIZE         dies, from 1 up to what the host has, GPU0 first (default 1).
 #                   vLLM starts only when the count divides the model's
 #                   attention heads.
@@ -32,7 +33,6 @@ LOCAL_LOG=$XDG_RUNTIME_DIR/$UNIT.log
 TIMEOUT=600
 
 case "$SERVER" in docker|local) ;; *) echo "service-start: server must be docker or local, got '$SERVER'" >&2; exit 1 ;; esac
-case "$DTYPE" in float32|half) ;; *) echo "service-start: DTYPE must be float32 or half, got '$DTYPE'" >&2; exit 1 ;; esac
 case "$MAX_MODEL_LEN" in ''|*[!0-9]*) echo "service-start: MAX_MODEL_LEN must be a number, got '$MAX_MODEL_LEN'" >&2; exit 1 ;; esac
 # No count is written here: the host says how many dies it has, and vLLM
 # says whether the model can be split that many ways.

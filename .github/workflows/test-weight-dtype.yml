@@ -1,21 +1,63 @@
 name: "Test: weight dtype"
 
-# FP32 weights, then FP16-stored weights with FP32 math: does the server still
-# answer, and what memory and speed does each hold?
-# Its own input is dtype, a server setting, so each value is a job with a server
-# of its own; every other input keeps its default in k80-test.yml.
+# Each name in `dtype` is a job with a server of its own storing its weights that
+# way: does the server still answer, and what memory and speed does each hold?
+# Values come from the Run form, else the repository variable, else the value
+# written here as a last resort.
 
 on:
   workflow_dispatch:
+    inputs:
+      dtype:
+        description: "Weight dtypes to run, comma separated; one job each (empty = repository variable TEST_DTYPES)"
+        default: ""
+        type: string
 
 jobs:
+  values:
+    name: dtype list
+    runs-on: [self-hosted, vllm]
+    outputs:
+      dtype: ${{ steps.list.outputs.dtype }}
+    steps:
+      # "float32,half" -> ["float32","half"], for the matrix below.
+      - id: list
+        env:
+          DTYPE: ${{ inputs.dtype || vars.TEST_DTYPES || 'float32,half' }}
+        run: |
+          DTYPE=${DTYPE// /}
+          echo "dtype=[\"${DTYPE//,/\",\"}\"]" >> "$GITHUB_OUTPUT"
   test:
+    needs: values
     strategy:
       max-parallel: 1
       fail-fast: false
       matrix:
-        dtype: ["float32", "half"]
-    uses: ./.github/workflows/k80-test.yml
-    with:
-      test: weight-dtype
-      dtype: ${{ matrix.dtype }}
+        dtype: ${{ fromJSON(needs.values.outputs.dtype) }}
+    name: weight-dtype (${{ matrix.dtype }})
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    # The server start, the calls and the judge. No build: a run never builds.
+    timeout-minutes: 60
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: weight-dtype
+          dtype: ${{ matrix.dtype }}
+          # Shared settings: repository variables; empty takes the default in
+          # docker/k80/ci/service-start.sh.
+          server: ${{ vars.TEST_SERVER }}
+          model: ${{ vars.TEST_MODEL }}
+          max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()

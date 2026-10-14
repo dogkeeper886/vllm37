@@ -1,12 +1,19 @@
 name: "Test: die count"
 
-# One die, then both dies of one board (tensor parallel size 2): does the server
-# still answer, and what memory and speed does each hold?
-# Its own input is dies, a server setting, so each value is a job with a server
-# of its own; every other input keeps its default in k80-test.yml.
+# Each count in `dies` is a job with a server of its own on that many dies
+# (tensor parallel size): does the server still answer, and what memory and speed
+# does each hold? Any count can be asked for: the host says how many dies it has,
+# and vLLM says whether the model splits that many ways.
+# Values come from the Run form, else the repository variable, else the value
+# written here as a last resort.
 
 on:
   workflow_dispatch:
+    inputs:
+      dies:
+        description: "Die counts to run, comma separated; one job each (empty = repository variable TEST_DIES)"
+        default: ""
+        type: string
 
 jobs:
   test:
@@ -14,8 +21,32 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        dies: ["1", "2"]
-    uses: ./.github/workflows/k80-test.yml
-    with:
-      test: die-count
-      dies: ${{ matrix.dies }}
+        # "1,2,4" -> [1, 2, 4]
+        dies: ${{ fromJSON(format('[{0}]', inputs.dies || vars.TEST_DIES || '1,2')) }}
+    name: die-count (${{ matrix.dies }} die)
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    # The server start, the calls and the judge. No build: a run never builds.
+    timeout-minutes: 60
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: die-count
+          dies: ${{ matrix.dies }}
+          # Shared settings: repository variables; empty takes the default in
+          # docker/k80/ci/service-start.sh.
+          server: ${{ vars.TEST_SERVER }}
+          model: ${{ vars.TEST_MODEL }}
+          max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()
