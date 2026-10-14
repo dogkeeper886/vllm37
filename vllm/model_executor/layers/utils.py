@@ -7,8 +7,11 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -85,10 +88,98 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
+# K80 fork (#95). On Kepler, cuBLAS runs a product of 2 or more rows on a
+# kernel that costs several times its one-row kernel: on a K80 die the
+# Qwen3-0.6B lm_head takes 3.7 ms for one row and 18.2 ms for two. Two other
+# ways avoid it for a small batch:
+#   bias   F.linear with a bias goes through cuBLASLt, which picks a good
+#          kernel in FP32 up to about 6 rows (lm_head, 4 rows: 3.9 ms). A
+#          layer without a bias gets a zero one. No effect in FP16.
+#   rows   a batched product against the same weight (batch stride 0) runs
+#          the one-row kernel for each row in one launch, and gives each row
+#          bit for bit what it gets alone. The faster way in FP16.
+# Which is fastest depends on the shape, so the first product of each shape,
+# dtype and row count times the ways and keeps the fastest. One row, and more
+# than 8 rows (prefill), always call F.linear.
+_SMALL_BATCH_MAX_ROWS = 8
+_small_batch_way: dict[tuple, str] = {}
+_zero_bias: dict[tuple, torch.Tensor] = {}
+_is_kepler: Optional[bool] = None
+
+
+def _by_rows(x: torch.Tensor, weight: torch.Tensor,
+             bias: Optional[torch.Tensor]) -> torch.Tensor:
+    m = x.shape[0]
+    w = weight.t().unsqueeze(0).expand(m, -1, -1)
+    if bias is None:
+        return torch.bmm(x.unsqueeze(1), w).squeeze(1)
+    return torch.baddbmm(bias.expand(m, 1, -1), x.unsqueeze(1), w).squeeze(1)
+
+
+def _ms(fn: Callable[[], torch.Tensor], iters: int = 5) -> float:
+    fn()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(iters):
+        fn()
+    end.record()
+    end.synchronize()
+    return start.elapsed_time(end)
+
+
+def _with_bias(x: torch.Tensor, weight: torch.Tensor,
+               bias: Optional[torch.Tensor]) -> torch.Tensor:
+    if bias is None:
+        key = (weight.shape[0], weight.dtype, weight.device)
+        bias = _zero_bias.get(key)
+        if bias is None:
+            bias = _zero_bias[key] = weight.new_zeros(weight.shape[0])
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def _small_batch_gemm(x: torch.Tensor, weight: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """The product the fastest way for a small batch, or None for F.linear."""
+    global _is_kepler
+    if not envs.VLLM_K80_SMALL_BATCH_GEMM or not x.is_cuda:
+        return None
+    if _is_kepler is None:
+        _is_kepler = torch.cuda.get_device_capability(x.device)[0] < 5
+    m = x.numel() // x.shape[-1] if x.shape[-1] else 0
+    if (not _is_kepler or not 2 <= m <= _SMALL_BATCH_MAX_ROWS
+            or weight.dim() != 2 or x.dtype != weight.dtype
+            or torch.compiler.is_compiling()
+            or torch.cuda.is_current_stream_capturing()):
+        return None
+    x2 = x.reshape(m, x.shape[-1])
+    key = (weight.shape[0], weight.shape[1], weight.dtype, m, bias is None)
+    way = _small_batch_way.get(key)
+    if way is None:
+        ways = {
+            "linear": lambda: torch.nn.functional.linear(x2, weight, bias),
+            "rows": lambda: _by_rows(x2, weight, bias),
+        }
+        if bias is None and weight.dtype == torch.float32:
+            ways["bias"] = lambda: _with_bias(x2, weight, None)
+        times = {name: _ms(fn) for name, fn in ways.items()}
+        way = _small_batch_way[key] = min(times, key=times.__getitem__)
+        logger.debug("K80 small-batch GEMM %s: %s (%s)", key, way,
+                     ", ".join(f"{k} {v:.3f} ms" for k, v in times.items()))
+    if way == "linear":
+        return None
+    out = (_by_rows(x2, weight, bias)
+           if way == "rows" else _with_bias(x2, weight, bias))
+    return out.view(*x.shape[:-1], weight.shape[0])
+
+
 def default_unquantized_gemm(layer: torch.nn.Module,
                              x: torch.Tensor,
                              weight: torch.Tensor,
                              bias: Optional[torch.Tensor] = None):
+    out = _small_batch_gemm(x, weight, bias)
+    if out is not None:
+        return out
     return torch.nn.functional.linear(x, weight, bias)
 
 
