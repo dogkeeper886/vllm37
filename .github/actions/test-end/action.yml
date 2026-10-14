@@ -1,0 +1,26 @@
+name: Test end
+description: >
+  The end of a test run: stop the server, give the GPUs back, judge every
+  reply, write the table and upload the report. Use it after the test action
+  under `if: always()`, so the cards go back whatever happened, cancel and
+  timeout included. It fails the job on a failed check, a "yes" from the
+  judge, an unclear verdict, an error, or a run with no reply.
+
+runs:
+  using: composite
+  steps:
+    - name: Service stop
+      shell: bash
+      run: docker/k80/ci/service-stop.sh
+    - name: Judge and report
+      if: always()
+      shell: bash
+      working-directory: docker/k80/ci/tests
+      run: npx tsx report.ts --test "$TEST_NAME" --input results/replies.json --output results/report.json
+    - name: Upload report
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ env.TEST_REPORT }}
+        path: docker/k80/ci/tests/results/
+        if-no-files-found: warn

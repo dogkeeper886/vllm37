@@ -1,15 +1,44 @@
 name: "Test: request length"
 
-# A short prompt (~870 tokens), then a long one (~7,300 tokens): does the server
-# still answer, and what is the prefill and decode speed of each?
-# Its own input is prompt; every other input keeps its default in k80-test.yml.
+# Each prompt in `prompt` is sent once: does the server still answer, and what is
+# the prefill and decode speed of each?
+# Values come from the Run form, else the repository variable, else the value
+# written here as a last resort.
 
 on:
   workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Prompt names from prompts.yaml to run, comma separated (empty = repository variable TEST_PROMPTS)"
+        default: ""
+        type: string
 
 jobs:
   test:
-    uses: ./.github/workflows/k80-test.yml
-    with:
-      test: request-length
-      prompt: "speech-rewrite,farewell-summary"
+    name: request-length
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    # The server start, the calls and the judge. No build: a run never builds.
+    timeout-minutes: 60
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: request-length
+          prompt: ${{ inputs.prompt || vars.TEST_PROMPTS || 'speech-rewrite,farewell-summary' }}
+          # Shared settings: repository variables; empty takes the default in
+          # docker/k80/ci/service-start.sh.
+          server: ${{ vars.TEST_SERVER }}
+          model: ${{ vars.TEST_MODEL }}
+          max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()

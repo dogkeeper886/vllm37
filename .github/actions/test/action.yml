@@ -1,0 +1,82 @@
+name: Test
+description: >
+  The steps of a test run, up to and including the test: the host, node, the
+  runtime check, the judge check, the server start and the test itself.
+  Always follow it with the test-end action under `if: always()`, which stops
+  the server, gives the GPUs back and judges the replies. The job that uses
+  this sets the runner, the k80-hardware lock, the time limit and the judge
+  settings (JUDGE_BASE_URL, JUDGE_MODEL), which an action cannot set.
+
+  One question for every run: under the condition the inputs set, does vllm37
+  still give a real answer and not garbage?
+
+inputs:
+  test:
+    description: "Name shown in the report"
+    required: true
+  server:
+    description: "Build to serve: docker = the image on the runner, local = the host build (empty = docker)"
+    default: ""
+  model:
+    description: "Hugging Face model id (empty = the default in service-start.sh)"
+    default: ""
+  dtype:
+    description: "Weight and KV cache dtype, such as float32 or half"
+    default: "float32"
+  dies:
+    description: "Dies (tensor parallel size): any count the host has, GPU0 first"
+    default: "1"
+  max_model_len:
+    description: "Context length in tokens (empty = the default in service-start.sh)"
+    default: ""
+  prompt:
+    description: "Prompt from prompts.yaml; a comma list runs each"
+    default: "speech-rewrite"
+  calls:
+    description: "Calls that send the prompt at once; a comma list runs each"
+    default: "1"
+  stagger:
+    description: "Tokens a call has streamed before the next is sent (0 = together); a comma list runs each"
+    default: "0"
+
+runs:
+  using: composite
+  steps:
+    # For test-end, which runs whatever happens below.
+    - shell: bash
+      env:
+        TEST: ${{ inputs.test }}
+        REPORT: ${{ inputs.test }}-${{ inputs.dtype }}-${{ inputs.dies }}die-report
+      run: |
+        echo "TEST_NAME=$TEST" >> "$GITHUB_ENV"
+        echo "TEST_REPORT=$REPORT" >> "$GITHUB_ENV"
+    - uses: ./.github/actions/identify-host
+    - uses: ./.github/actions/setup-tests
+    - name: Runtime
+      shell: bash
+      env:
+        SERVER: ${{ inputs.server }}
+      run: docker/k80/ci/runtime.sh "$SERVER"
+    # Before the GPUs are taken: a run with no judge would test nothing.
+    - name: Judge ready
+      shell: bash
+      working-directory: docker/k80/ci/tests
+      run: npx tsx report.ts --ready
+    - name: Service start
+      shell: bash
+      env:
+        SERVER: ${{ inputs.server }}
+        MODEL: ${{ inputs.model }}
+        DTYPE: ${{ inputs.dtype }}
+        TP_SIZE: ${{ inputs.dies }}
+        MAX_MODEL_LEN: ${{ inputs.max_model_len }}
+      run: docker/k80/ci/service-start.sh "$SERVER"
+    - name: Test
+      shell: bash
+      working-directory: docker/k80/ci/tests
+      env:
+        TEST: ${{ inputs.test }}
+        PROMPT: ${{ inputs.prompt }}
+        CALLS: ${{ inputs.calls }}
+        STAGGER: ${{ inputs.stagger }}
+      run: npx tsx test.ts --test "$TEST" --prompt "$PROMPT" --calls "$CALLS" --stagger "$STAGGER" --output results/replies.json

@@ -1,17 +1,50 @@
 name: "Test: arrival"
 
-# Two calls sent together, then the second sent once the first has streamed 20
-# tokens: does the server still answer when a call joins a running one?
-# Its own input is stagger, and arrival needs two calls; every other input keeps
-# its default in k80-test.yml.
+# Each value in `stagger` sends the next call once the one before it has streamed
+# that many tokens; 0 sends them together. Does the server still answer when a
+# call joins a running one? `calls` says how many calls arrive.
+# Values come from the Run form, else the repository variable, else the value
+# written here as a last resort.
 
 on:
   workflow_dispatch:
+    inputs:
+      stagger:
+        description: "Token counts to run, comma separated; 0 sends the calls together (empty = repository variable TEST_STAGGER)"
+        default: ""
+        type: string
+      calls:
+        description: "How many calls arrive (empty = repository variable TEST_ARRIVAL_CALLS)"
+        default: ""
+        type: string
 
 jobs:
   test:
-    uses: ./.github/workflows/k80-test.yml
-    with:
-      test: arrival
-      calls: "2"
-      stagger: "0,20"
+    name: arrival
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    # The server start, the calls and the judge. No build: a run never builds.
+    timeout-minutes: 60
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: arrival
+          stagger: ${{ inputs.stagger || vars.TEST_STAGGER || '0,20' }}
+          calls: ${{ inputs.calls || vars.TEST_ARRIVAL_CALLS || '2' }}
+          # Shared settings: repository variables; empty takes the default in
+          # docker/k80/ci/service-start.sh.
+          server: ${{ vars.TEST_SERVER }}
+          model: ${{ vars.TEST_MODEL }}
+          max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()

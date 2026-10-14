@@ -1,6 +1,6 @@
 # K80 host build
 
-Builds and serves vllm37 on the host filesystem, for fast iteration on a machine that has the K80 driver and toolchain installed. CI tests the `docker/k80` image by default, and this build when a test is run with `server: local`.
+Builds and serves vllm37 on the host filesystem, for fast iteration on a machine that has the K80 driver and toolchain installed. CI tests the `docker/k80` image by default, and this build when the repository variable `TEST_SERVER` is `local`.
 
 | | Host build | Docker build |
 |---|---|---|
