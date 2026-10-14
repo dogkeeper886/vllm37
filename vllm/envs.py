@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    VLLM_K80_SMALL_BATCH_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
@@ -744,6 +745,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
+             ("true", "1")),
+
+    # K80 fork (#95): on Kepler, time a batch of 2-8 rows as one product per
+    # row and keep the faster way per shape. 0 always calls F.linear.
+    "VLLM_K80_SMALL_BATCH_GEMM":
+    lambda: (os.getenv("VLLM_K80_SMALL_BATCH_GEMM", "True").lower() in
              ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
