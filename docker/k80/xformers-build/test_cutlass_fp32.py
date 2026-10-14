@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Runtime smoke test for XFormers cutlassF on K80. k80-runtime.yml runs it
-# inside the runtime image before the server takes the GPU.
+# Runtime smoke test for XFormers cutlassF on K80. No workflow runs it now;
+# run it by hand inside the runtime image while no server holds the GPU.
 #
 # Allocates small fp32
 # q/k/v tensors on cuda:0, calls xformers.ops.memory_efficient_attention, and

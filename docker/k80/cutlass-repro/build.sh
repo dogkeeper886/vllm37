@@ -16,8 +16,8 @@
 #   3. Compiles both .cu files with nvcc, targeting sm_37.
 #   4. Prints the resulting binary paths + sizes for the caller.
 #
-# The runtime execution is intentionally NOT done here — see the
-# k80-cutlass-repro CI workflow for the orchestration.
+# The runtime execution is intentionally NOT done here. No workflow runs the
+# binaries now; run them by hand on the host.
 #
 # Idempotent: re-running re-applies the patch via `git apply -3` so an
 # already-patched tree doesn't trip up subsequent builds.
@@ -26,8 +26,8 @@ set -euo pipefail
 
 REPRO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # All env vars below respect caller-supplied overrides (`:-` defaulting).
-# This matters because the k80-cutlass-repro workflow mounts the patches dir
-# at /patches inside the container, NOT at $REPRO_DIR/../cutlass-patches.
+# This matters when a caller mounts the patches dir elsewhere, such as
+# /patches inside a container, NOT at $REPRO_DIR/../cutlass-patches.
 PATCH_DIR="${PATCH_DIR:-${REPRO_DIR}/../cutlass-patches}"
 WORK_DIR="${WORK_DIR:-/tmp/cutlass-sm37-build}"
 CUTLASS_TAG="${CUTLASS_TAG:-v4.0.0}"
@@ -77,8 +77,7 @@ echo "found ${#patch_files[@]} patch(es) in ${PATCH_DIR}:"
 for p in "${patch_files[@]}"; do echo "  - $(basename "$p")"; done
 
 # Use `git apply -3` for 3-way merge — handles already-applied AND minor
-# context drift if upstream CUTLASS adds nearby content. README §
-# "Idempotency" documents the rationale.
+# context drift if upstream CUTLASS adds nearby content.
 for patch_file in "${patch_files[@]}"; do
     patch_name="$(basename "${patch_file}")"
     echo "applying ${patch_name}..."

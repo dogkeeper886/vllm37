@@ -1,6 +1,6 @@
 # K80 host build
 
-Builds and serves vllm37 on the host filesystem, for fast iteration on a machine that has the K80 driver and toolchain installed. CI keeps using the `docker/k80` images.
+Builds and serves vllm37 on the host filesystem, for fast iteration on a machine that has the K80 driver and toolchain installed. CI tests the `docker/k80` image by default, and this build when a test is run with `server: local`.
 
 | | Host build | Docker build |
 |---|---|---|
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=0 tools/k80-host/serve.sh                     # TinyLlama, 
 MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 tools/k80-host/serve.sh
 ```
 
-Same engine settings as `docker/k80/docker-compose.yml`. Keep `TP_SIZE` at 1 or 2: TP=4 across both K80 boards can overload the shared CPU power cable.
+Same engine settings as `docker/k80/docker-compose.yml`.
 
 ## Run as a service
 

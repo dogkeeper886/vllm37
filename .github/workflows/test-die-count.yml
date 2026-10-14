@@ -2,7 +2,6 @@ name: "Test: die count"
 
 # One die, then both dies of one board (tensor parallel size 2): does the server
 # still answer, and what memory and speed does each hold?
-# Never more than 2 dies: four have halted this machine.
 # Its own input is dies, a server setting, so each value is a job with a server
 # of its own; every other input keeps its default in k80-test.yml.
 

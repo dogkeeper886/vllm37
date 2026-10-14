@@ -10,7 +10,9 @@
 # Env (the defaults are the first row of the use-case table):
 #   MODEL           Hugging Face model id (default Qwen/Qwen3-0.6B)
 #   DTYPE           float32 or half (default float32)
-#   TP_SIZE         dies: 1, or 2 for both dies of one board (default 1)
+#   TP_SIZE         dies, from 1 up to what the host has, GPU0 first (default 1).
+#                   vLLM starts only when the count divides the model's
+#                   attention heads.
 #   MAX_MODEL_LEN   context length in tokens (default 12288)
 #   VLLM37_RESULTS  where server.json goes (default ci/tests/results)
 # Output: a Server table on stdout and in $GITHUB_STEP_SUMMARY, and server.json.
@@ -32,9 +34,15 @@ TIMEOUT=600
 case "$SERVER" in docker|local) ;; *) echo "service-start: server must be docker or local, got '$SERVER'" >&2; exit 1 ;; esac
 case "$DTYPE" in float32|half) ;; *) echo "service-start: DTYPE must be float32 or half, got '$DTYPE'" >&2; exit 1 ;; esac
 case "$MAX_MODEL_LEN" in ''|*[!0-9]*) echo "service-start: MAX_MODEL_LEN must be a number, got '$MAX_MODEL_LEN'" >&2; exit 1 ;; esac
-# Four dies run both boards from one power cable and have halted this machine.
-case "$TP_SIZE" in 1|2) ;; *) echo "service-start: TP_SIZE must be 1 or 2, got '$TP_SIZE'" >&2; exit 1 ;; esac
-# Two dies have hung this machine before: keep the tensor-parallel start-up trace.
+# No count is written here: the host says how many dies it has, and vLLM
+# says whether the model can be split that many ways.
+case "$TP_SIZE" in ''|*[!0-9]*|0*) echo "service-start: TP_SIZE must be a whole number from 1, got '$TP_SIZE'" >&2; exit 1 ;; esac
+HOST_DIES=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+if [ "$TP_SIZE" -gt "$HOST_DIES" ]; then
+  echo "service-start: asked for $TP_SIZE dies, this host has $HOST_DIES" >&2
+  exit 1
+fi
+# More than one die: keep the tensor-parallel start-up trace.
 export VLLM_K80_TRACE=${VLLM_K80_TRACE:-$([ "$TP_SIZE" -gt 1 ] && echo 1 || echo 0)}
 
 BUILD=$("$HERE/runtime.sh" "$SERVER" commit)
@@ -47,8 +55,8 @@ systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 if [ "$SERVER" = docker ]; then
   COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.ci.yml} "$HERE/../container-up.sh" "$TIMEOUT"
 else
-  # The dies the container takes: the first TP_SIZE of board A.
-  DEVICES=$([ "$TP_SIZE" -gt 1 ] && echo 0,1 || echo 0)
+  # The dies the container takes: the first TP_SIZE.
+  DEVICES=$(seq -s, 0 $(( TP_SIZE - 1 )))
   : > "$LOCAL_LOG"
   systemd-run --user --unit="$UNIT" --collect --quiet \
     --setenv=MODEL="$MODEL" --setenv=DTYPE="$DTYPE" --setenv=TP_SIZE="$TP_SIZE" \

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Serve a model from the host build with the same settings as docker/k80/docker-compose.yml.
 # Extra arguments go to the vLLM server, e.g. serve.sh --model-impl transformers
-# Env: MODEL, TP_SIZE (default 1; TP=4 is power-risky on 2x K80), MAX_MODEL_LEN,
+# Env: MODEL, TP_SIZE (default 1), MAX_MODEL_LEN,
 #      GPU_MEM_UTIL, DTYPE, PORT, CUDA_VISIBLE_DEVICES,
 #      VLLM_ATTENTION_BACKEND (XFORMERS default, or TORCH_SDPA).
 set -euo pipefail
