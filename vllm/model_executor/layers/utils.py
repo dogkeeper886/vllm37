@@ -149,13 +149,16 @@ def _small_batch_gemm(x: torch.Tensor, weight: torch.Tensor,
     m = x.numel() // x.shape[-1] if x.shape[-1] else 0
     if (not _is_kepler or not 2 <= m <= _SMALL_BATCH_MAX_ROWS
             or weight.dim() != 2 or x.dtype != weight.dtype
-            or torch.compiler.is_compiling()
-            or torch.cuda.is_current_stream_capturing()):
+            or torch.compiler.is_compiling()):
         return None
     x2 = x.reshape(m, x.shape[-1])
     key = (weight.shape[0], weight.shape[1], weight.dtype, m, bias is None)
     way = _small_batch_way.get(key)
     if way is None:
+        # A CUDA graph capture cannot time the ways; vLLM runs each batch
+        # size uncaptured first, so the choice is normally already made.
+        if torch.cuda.is_current_stream_capturing():
+            return None
         ways = {
             "linear": lambda: torch.nn.functional.linear(x2, weight, bias),
             "rows": lambda: _by_rows(x2, weight, bias),

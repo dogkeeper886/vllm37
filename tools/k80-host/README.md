@@ -31,6 +31,16 @@ MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 tools/k80-host/serve.sh
 
 Same engine settings as `docker/k80/docker-compose.yml`.
 
+`VLLM_K80_CUDA_GRAPHS=1` captures decode in CUDA graphs instead of passing `--enforce-eager` (#93). The outputs are the same, and decode is faster where kernel launches dominate: Qwen3-0.6B on two dies +32–42 %, Qwen3-8B int4 on four dies +11–20 %, one die of the board on the chipset link (GPU2) about +60 % for Qwen3-0.6B, one die of the CPU-attached board +1–6 %. The graphs take about 1–2 GiB per die and 15–140 s at startup, so leave room with a lower `GPU_MEM_UTIL` (0.78 for 8B int4).
+
+## Clocks
+
+```bash
+tools/k80-host/clock_sample.py --dies 0,1 --csv trace.csv -- <command>
+```
+
+Records each die's SM clock, utilization, power, temperature and throttle reasons while the command runs, and the driver's own log of clock changes (NVML, read only; it never sets a clock or power limit). From Python, `with Sampler(dies=[0]) as s: ...` then `s.summary()`. A timing on these cards depends on the clock: under load a die sits at its 149 W cap at 600–800 MHz, not 875, and a die that reaches 88 °C is slowed by the hardware.
+
 ## Run as a service
 
 ```bash
