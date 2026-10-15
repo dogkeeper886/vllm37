@@ -620,6 +620,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "k80_int4_dequantize(Tensor! out, Tensor qweight, Tensor scales, "
       "Tensor zeros) -> ()");
   ops.impl("k80_int4_dequantize", torch::kCUDA, &k80_int4_dequantize);
+
+  // K80 fork (#111): product and dequantize for GGUF Q4_K and Q6_K weights
+  // as stored (uint8 [N, row bytes]); type is the GGMLQuantizationType.
+  ops.def("k80_gguf_gemm(Tensor x, Tensor qweight, int type) -> Tensor");
+  ops.impl("k80_gguf_gemm", torch::kCUDA, &k80_gguf_gemm);
+  ops.def("k80_gguf_dequantize(Tensor! out, Tensor qweight, int type) -> ()");
+  ops.impl("k80_gguf_dequantize", torch::kCUDA, &k80_gguf_dequantize);
 #endif
 
 #if !defined(VLLM_BUILD_LEGACY_CUDA)
