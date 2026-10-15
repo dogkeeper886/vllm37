@@ -80,9 +80,9 @@ Official vLLM enforces `get_min_capability()` at `vllm/config/vllm.py:943`.
 | compressed-tensors w4a16 (Gemma 4 QAT) | compressed-tensors | 70 (config) / 75 (scheme) | Part 4 |
 | NVFP4 (NVIDIA re-releases, Granite) | ModelOpt / compressed-tensors | 75 | Parts 4, 5 |
 | MXFP4 (gpt-oss, Granite) | `Mxfp4Config` | 80 | `mxfp4.py:67-77` |
-| GGUF | moved out of official main (vllm-gguf-plugin); fork's GGUF needs 60 | — | Parts 4, 7; `vllm37:gguf.py:43`; issues #73, #74 |
+| GGUF | moved out of official main (vllm-gguf-plugin); the fork runs it on Kepler through the K80 int4 layout (#107) | — | Part 9.4; `vllm37:k80_gguf.py` |
 
-**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74); GGUF is #107. Everything else is BF16 safetensors, loaded as FP32 or FP16.
+**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74). GGUF files load too (#107): Q4_0, Q4_1 and Q4_K tensors use the same layout and kernels, and other types are dequantized at load. Everything else is BF16 safetensors, loaded as FP32 or FP16.
 
 ### 1.5 Ranking by porting cost
 
@@ -734,7 +734,7 @@ No per-layer embeddings, AltUp, KV sharing or MoE. Those are Gemma 3n features (
 | W4A16 CT (RedHatAI `quantized.w4a16`) | `CompressedTensorsWNA16` | 75 (scheme), 70 (config) | `compressed_tensors_wNa16.py:102-104`; `compressed_tensors.py:117-118` |
 | W8A8 INT8 CT (RedHatAI `quantized.w8a8`) | `CompressedTensorsW8A8Int8` | 75 | `compressed_tensors_w8a8_int8.py:35-37` |
 | FP8-dynamic CT (RedHatAI) | `CompressedTensorsW8A8Fp8` | 89 | `compressed_tensors_w8a8_fp8.py:83-85` |
-| GGUF in the K80 fork | `GGUFConfig` | 60 (still > 37) | `vllm37/vllm/model_executor/layers/quantization/gguf.py:43-44`; registered at `vllm37/.../quantization/__init__.py:21, 133` |
+| GGUF in the K80 fork | `GGUFConfig`, on Kepler `k80_gguf.py` | 60, passed on Kepler (#107) | `vllm37/vllm/model_executor/layers/quantization/k80_gguf.py` |
 
 #### In the K80 fork (vllm37)
 
@@ -759,7 +759,7 @@ Blockers in official vLLM, with what would remove each:
    - Fix: lift the fp16 block with fp32 residual/norm accumulation. This is not recommended without validation, given Google's documented instability that vLLM cites. Or keep fp32 and target only 270m/1b (and 4b with TP=2).
 3. **Quantized formats** all need CC ≥ 60–89 (table above).
    - Fix: run the BF16 `qat-q4_0-unquantized` / `qat-int4-unquantized` checkpoints upcast to fp32. These are just BF16 tensors, but they give no memory win.
-   - Or port a sm_37 dequant GEMM for GGUF Q4_0. The fork's GGUFConfig gate (60) would need lowering and its kernels need a sm_37 build. Both UNVERIFIED.
+   - Or load the GGUF Q4_0 file: the fork runs GGUF Q4_0 on Kepler (#107). Gemma 3 GGUF itself was not run.
 4. **torch.compile** must be disabled (`gemma3.py:292`). The RMSNorm, GELU-tanh and RoPE ops all have native fallbacks (rows above) if the `_C` extension is not built for sm_37.
 
 The SigLIP vision tower is not a blocker: it is skippable, and on CC < 8.0 it uses TORCH_SDPA anyway.
@@ -1762,8 +1762,15 @@ End to end: offline, greedy, 128-token answers, 85 % of each die for vLLM (Mistr
 - **Same answers:** 71 of 72 Qwen3-0.6B texts (compressed-tensors, GPTQ, AWQ; float32, half, 2 dies) are word for word the #73 path's; perplexity matches to three decimals. The one that differs (GPTQ, half) branches at a near-tie after 102 characters.
 - **Not explained:** Qwen3-14B float32 is slower at 4 calls than at 2.
 
+GGUF (#107): `quantization/k80_gguf.py` converts each GGUF tensor at load. Q4_0, Q4_1 and Q4_K go into the K80 int4 layout with one fp32 scale and zero per 32 weights; Q4_K's `d·sc·q − dmin·m` becomes `zero = dmin·m / (d·sc)`. Other types (Q6_K, Q8_0, …) are dequantized to the model dtype, and F16 tensors are kept. A fused layer whose shards differ (Q4_K q and k, Q6_K v) runs as one piece per path. Embeddings and a tied LM head stay in the int4 layout when their type allows. **[measured]**
+
+- **Decode:** Q4_0 is exact against the `gguf` package's dequantize; Q4_1 and Q4_K are within one FP32 rounding (1.2e-7 relative) on every tensor of three Qwen3-0.6B files.
+- **Against the same file dequantized on the CPU (Qwen3-0.6B):** in float32, Q4_0 and Q4_K_M give the same 8 texts and the same perplexity (29.8742, 29.8965), at TP=1 and TP=2. In half precision each gives 7 of 8 texts, branching at a near-tie, with perplexity within 0.01.
+- **Weights, Qwen3-0.6B (float32 / half):** Q4_0 0.91 / 0.61 GiB, Q4_K_M 1.09 / 0.69 GiB, against 2.24 / 1.12 GiB unquantized. The Q6_K embedding (151,936 × 1,024), dequantized, is most of it.
+- **ollama's own files run** (`deepseek-r1:8b` and `llama3.1:8b`, Q4_K_M, from the ollama model store), but take more memory than the Hugging Face int4 checkpoint: 7.75 GiB of weights on one die against 5.99 GiB for `Qwen3-8B-quantized.w4a16`, so one die holds a 2,048-token context only at 95 % of the die. The 2 bits per weight of fp32 scale and zero per 32 weights and the dequantized Q6_K tensors (the output layer and half of `ffn_down`) cost it. Decode in half on one die: 14.8 tok/s (`deepseek-r1:8b`) and 15.9 (`llama3.1:8b`); `deepseek-r1:8b` on two dies 21.7.
+
 ### 9.5 What is left
 
-- GGUF Q4 checkpoints (#107).
+- GGUF at its own size: K80 kernels that read Q4_K and Q6_K blocks as stored (ollama37's `mmvq-k80.cu` shape), so a Q4_K_M file takes its own 5.2 GB, not 7.75 GiB.
 - An int8 (4 per word) variant: no int8 weight-only checkpoint reaches `K80Int4LinearKernel` yet.
 - FP8 / FP4 weights decoded by bit operations, as weight-only formats.
