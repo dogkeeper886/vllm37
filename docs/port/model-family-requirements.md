@@ -1740,6 +1740,28 @@ Measured on one die (GPU1), group 128, against a float64 product. **[measured]**
 - **Batch:** at 2–8 rows `k80_int4_gemm` beats dequantize + GEMM by 3.4–11×. Run in chunks of 8 rows, it still wins up to 48 rows, and loses from 64.
 - **Dropped:** one warp per row (the prototype's shape) read 54–71 GB/s. FP32 dequantize with 32-byte stores per thread read 92 GB/s; two threads per word with one `float4` each reach 150. FP16 dequantize with the generic two-rounding path read 125 GB/s; when the zero is a whole number, `q − z` is exact in half, and skipping that rounding reaches 152.
 
+End to end: offline, greedy, 128-token answers, 85 % of each die for vLLM (Mistral-Nemo on one die: 95 %). The #73 PyTorch path decoded Qwen3-8B half on one die at 0.5 tok/s. **[measured]**
+
+| Model | Dtype | Dies | Weights per die | tok/s at 1 / 2 / 4 calls | Perplexity |
+|---|---|---|---|---|---|
+| Qwen3-4B (unquantized) | float32 | 2 | 7.57 GiB | 14.1 / 27.2 / 51.2 | 15.04 |
+| Qwen3-4B int4 | float32 | 1 | 3.39 GiB | 28.3 / 44.6 / 61.4 | 15.77 |
+| Qwen3-4B int4 | float32 | 2 | 1.70 GiB | 32.9 / 57.4 / 90.2 | 15.77 |
+| Qwen3-8B (unquantized) | half | 2 | 7.64 GiB | 13.3 / 10.7 / 8.6 | 10.88 |
+| Qwen3-8B int4 | half | 1 | 5.99 GiB | 20.9 / 27.8 / 31.2 | 10.92 |
+| Qwen3-8B int4 | float32 | 2 | 4.18 GiB | 25.2 / 42.0 / 58.0 | 10.91 |
+| Yi-1.5-9B int4 (GPTQ) | half | 1 | 5.42 GiB | 20.3 / 29.3 / 33.6 | 10.66 |
+| Yi-1.5-9B int4 (GPTQ) | float32 | 2 | 3.22 GiB | 23.6 / 39.8 / 53.5 | 10.64 |
+| Mistral-Nemo 12B int4 | half | 1 | 8.51 GiB | 14.7 / 20.3 / 22.7 | 7.80 |
+| Mistral-Nemo 12B int4 | float32 | 2 | 5.91 GiB | 19.7 / 31.7 / 41.5 | 7.81 |
+| Qwen3-14B int4 | half | 2 | 4.96 GiB | 18.7 / 29.1 / 35.7 | 7.98 |
+| Qwen3-14B int4 | float32 | 2 | 6.42 GiB | 16.7 / 26.0 / 21.2 | 7.99 |
+
+- **Fit:** 9B fits one die. 12B fits one die only at 95 %, with room for about 5,000 tokens of context. 14B half runs out of memory loading on one die. Unquantized 8B in float32 needs four dies.
+- **Through the server:** `Test: all` on Qwen3-8B int4 passed every test (run 38667249262): half on 2 dies decodes at 30–32 tok/s with room for 71,872 tokens, and on 1 die at 20–22.
+- **Same answers:** 71 of 72 Qwen3-0.6B texts (compressed-tensors, GPTQ, AWQ; float32, half, 2 dies) are word for word the #73 path's; perplexity matches to three decimals. The one that differs (GPTQ, half) branches at a near-tie after 102 characters.
+- **Not explained:** Qwen3-14B float32 is slower at 4 calls than at 2.
+
 ### 9.5 What is left
 
 - GGUF Q4 checkpoints (#107).
