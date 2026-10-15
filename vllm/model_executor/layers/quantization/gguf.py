@@ -53,6 +53,12 @@ class GGUFConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+            on_kepler)
+        if on_kepler():  # K80 fork (#107): no GGUF CUDA kernels on sm_37
+            from vllm.model_executor.layers.quantization.k80_gguf import (
+                k80_gguf_quant_method)
+            return k80_gguf_quant_method(self, layer)
         if isinstance(layer, LinearBase):
             return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):

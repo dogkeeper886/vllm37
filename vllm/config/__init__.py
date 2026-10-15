@@ -3889,10 +3889,10 @@ class VllmConfig:
                 K80_INT4_METHODS, on_kepler)
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
-            # K80 fork (#73): int4 weight-only checkpoints run on Kepler in
-            # float32 or float16 through K80Int4LinearKernel.
-            k80_int4 = (model_config.quantization in K80_INT4_METHODS
-                        and on_kepler()
+            # K80 fork (#73, #107): int4 weight-only and GGUF checkpoints run
+            # on Kepler in float32 or float16 through the K80 int4 layout.
+            k80_int4 = (model_config.quantization
+                        in K80_INT4_METHODS + ("gguf", ) and on_kepler()
                         and model_config.dtype in (torch.float32,
                                                    torch.float16))
 

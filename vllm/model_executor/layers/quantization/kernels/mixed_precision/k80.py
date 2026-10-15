@@ -69,6 +69,61 @@ def k80_int4_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
     return w.view(n, k)
 
 
+def k80_int4_ops(group_size: int):
+    """vllm._custom_ops when the K80 int4 kernels can serve this group size,
+    else None (the PyTorch reference path). Logs which, once."""
+    from vllm import _custom_ops as ops
+    use = (envs.VLLM_K80_INT4_KERNEL and hasattr(torch.ops._C, "k80_int4_gemm")
+           and group_size % 8 == 0)
+    logger.info_once(
+        "K80 int4 layers use %s", "the K80 CUDA kernels" if use else
+        "the PyTorch reference path (slow; VLLM_K80_INT4_KERNEL=0, a build "
+        "without csrc/quantization/k80, or a group size that is not a "
+        "multiple of 8)")
+    return ops if use else None
+
+
+def k80_int4_matmul(layer: torch.nn.Module, x_2d: torch.Tensor,
+                    qweight: torch.Tensor, scales: torch.Tensor,
+                    zeros: torch.Tensor, ops, gemm,
+                    bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """x_2d [M, K] times the transpose of an [N, K] weight in the K80 int4
+    layout. `ops` comes from k80_int4_ops(); `gemm` is the unquantized GEMM."""
+    if ops is None:
+        weight = k80_int4_dequantize(qweight, scales, zeros, x_2d.dtype)
+        return gemm(layer, x_2d, weight, bias)
+    if x_2d.shape[0] <= K80_INT4_GEMM_MAX_ROWS:
+        x_2d = x_2d.contiguous()
+        if x_2d.data_ptr() % 16:
+            x_2d = x_2d.clone()
+        out = ops.k80_int4_gemm(x_2d, qweight, scales, zeros)
+        if bias is not None:
+            out.add_(bias)
+        return out
+    weight = torch.empty((qweight.shape[0], qweight.shape[1] * 8),
+                         dtype=x_2d.dtype,
+                         device=x_2d.device)
+    ops.k80_int4_dequantize(weight, qweight, scales, zeros)
+    return gemm(layer, x_2d, weight, bias)
+
+
+def k80_int4_rows(qweight: torch.Tensor, scales: torch.Tensor,
+                  zeros: torch.Tensor, rows: torch.Tensor, ops,
+                  dtype: torch.dtype) -> torch.Tensor:
+    """Rows `rows` of an [N, K] weight in the K80 int4 layout, in `dtype` (an
+    embedding lookup)."""
+    q = qweight.index_select(0, rows)
+    s = scales.index_select(0, rows)
+    z = zeros.index_select(0, rows)
+    if ops is None:
+        return k80_int4_dequantize(q, s, z, dtype)
+    out = torch.empty((q.shape[0], q.shape[1] * 8),
+                      dtype=dtype,
+                      device=q.device)
+    ops.k80_int4_dequantize(out, q, s, z)
+    return out
+
+
 def _rows_out(t: torch.Tensor, output_dim: int) -> torch.Tensor:
     """A 2D tensor with the output features as rows."""
     return t if output_dim == 0 else t.t()
@@ -176,16 +231,7 @@ class K80Int4LinearKernel(MPLinearKernel):
         layer.k80_zeros = torch.nn.Parameter(zeros, requires_grad=False)
         layer.k80_perm = perm
         self._gemm = dispatch_unquantized_gemm()
-
-        from vllm import _custom_ops as ops
-        self._ops = ops if (envs.VLLM_K80_INT4_KERNEL and hasattr(
-            torch.ops._C, "k80_int4_gemm") and group_size % 8 == 0) else None
-        logger.info_once(
-            "K80 int4 layers use %s",
-            "the K80 CUDA kernels" if self._ops is not None else
-            "the PyTorch reference path (slow; VLLM_K80_INT4_KERNEL=0, a "
-            "build without csrc/quantization/k80, or a group size that is "
-            "not a multiple of 8)")
+        self._ops = k80_int4_ops(group_size)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -195,21 +241,7 @@ class K80Int4LinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, k)
         if layer.k80_perm is not None:
             x_2d = x_2d.index_select(1, layer.k80_perm)
-        if self._ops is None:
-            weight = k80_int4_dequantize(layer.k80_qweight, layer.k80_scales,
-                                         layer.k80_zeros, x.dtype)
-            out = self._gemm(layer, x_2d, weight, bias)
-        elif x_2d.shape[0] <= K80_INT4_GEMM_MAX_ROWS:
-            x_2d = x_2d.contiguous()
-            if x_2d.data_ptr() % 16:
-                x_2d = x_2d.clone()
-            out = self._ops.k80_int4_gemm(x_2d, layer.k80_qweight,
-                                          layer.k80_scales, layer.k80_zeros)
-            if bias is not None:
-                out.add_(bias)
-        else:
-            weight = torch.empty((n, k), dtype=x.dtype, device=x.device)
-            self._ops.k80_int4_dequantize(weight, layer.k80_qweight,
-                                          layer.k80_scales, layer.k80_zeros)
-            out = self._gemm(layer, x_2d, weight, bias)
+        out = k80_int4_matmul(layer, x_2d, layer.k80_qweight,
+                              layer.k80_scales, layer.k80_zeros, self._ops,
+                              self._gemm, bias)
         return out.reshape(x.shape[:-1] + (n, ))
