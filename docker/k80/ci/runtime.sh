@@ -35,7 +35,8 @@ case "$SERVER" in
     ;;
   local)
     [ -x "$VENV/bin/python" ] || missing "No local build at \`$VENV\`. Run tools/k80-host/setup.sh."
-    PKG=$("$VENV/bin/python" -c "import importlib.util as u; s = u.find_spec('vllm'); print(s.submodule_search_locations[0] if s else '')")
+    # -I: CI runs this in its own checkout, whose vllm/ would shadow the build.
+    PKG=$("$VENV/bin/python" -I -c "import importlib.util as u; s = u.find_spec('vllm'); print(s.submodule_search_locations[0] if s else '')")
     [ -n "$PKG" ] || missing "The venv \`$VENV\` has no vllm installed. Run tools/k80-host/setup.sh."
     TREE=$(git -C "$PKG" rev-parse --show-toplevel 2>/dev/null || true)
     if [ -n "$TREE" ]; then
