@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_K80_SMALL_BATCH_GEMM: bool = True
+    VLLM_K80_INT4_KERNEL: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
@@ -751,6 +752,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # row and keep the faster way per shape. 0 always calls F.linear.
     "VLLM_K80_SMALL_BATCH_GEMM":
     lambda: (os.getenv("VLLM_K80_SMALL_BATCH_GEMM", "True").lower() in
+             ("true", "1")),
+
+    # K80 fork (#74): int4 layers on Kepler use the K80 CUDA kernels (fused
+    # product for up to 48 rows, fast dequantize above). 0 keeps the PyTorch
+    # reference path of #73.
+    "VLLM_K80_INT4_KERNEL":
+    lambda: (os.getenv("VLLM_K80_INT4_KERNEL", "True").lower() in
              ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
