@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_K80_SMALL_BATCH_GEMM: bool = True
     VLLM_K80_INT4_KERNEL: bool = True
+    VLLM_K80_CUDA_GRAPHS: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
@@ -759,6 +760,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # reference path of #73.
     "VLLM_K80_INT4_KERNEL":
     lambda: (os.getenv("VLLM_K80_INT4_KERNEL", "True").lower() in
+             ("true", "1")),
+
+    # K80 fork (#93): capture decode in CUDA graphs on Kepler instead of
+    # forcing eager mode. Same outputs; faster where launches dominate (two
+    # and four dies), at the cost of graph memory (about 1-2 GiB per die:
+    # lower gpu_memory_utilization) and capture time at startup.
+    "VLLM_K80_CUDA_GRAPHS":
+    lambda: (os.getenv("VLLM_K80_CUDA_GRAPHS", "False").lower() in
              ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm

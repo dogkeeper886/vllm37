@@ -187,15 +187,18 @@ class CudaPlatformBase(Platform):
 
         compilation_config = vllm_config.compilation_config
 
-        # Kepler GPUs (sm < 70): disable CUDA graphs and force eager mode.
-        # CUDA graphs require features not available on these older GPUs.
-        if not cls.has_device_capability(70):
+        # Kepler GPUs (sm < 70): eager mode unless VLLM_K80_CUDA_GRAPHS=1
+        # (#93: capture and replay work on sm_37; a graph replays a decode
+        # step without a launch per kernel).
+        if (not cls.has_device_capability(70)
+                and not envs.VLLM_K80_CUDA_GRAPHS):
             compilation_config.use_cudagraph = False
             if model_config is not None:
                 model_config.enforce_eager = True
             logger.info(
                 "Kepler GPU detected (sm < 70): forcing eager mode and "
-                "disabling CUDA graphs.")
+                "disabling CUDA graphs (VLLM_K80_CUDA_GRAPHS=1 enables "
+                "them).")
 
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
