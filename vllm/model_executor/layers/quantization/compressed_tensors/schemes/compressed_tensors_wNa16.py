@@ -69,7 +69,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # K80 fork (#73): Kepler runs int4 through K80Int4LinearKernel.
+        # K80 fork (#73, #109): Kepler runs int4 and int8 through
+        # K80Int4LinearKernel.
         if on_kepler():
             return 30
         # ampere and up

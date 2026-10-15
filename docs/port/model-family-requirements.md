@@ -80,9 +80,9 @@ Official vLLM enforces `get_min_capability()` at `vllm/config/vllm.py:943`.
 | compressed-tensors w4a16 (Gemma 4 QAT) | compressed-tensors | 70 (config) / 75 (scheme) | Part 4 |
 | NVFP4 (NVIDIA re-releases, Granite) | ModelOpt / compressed-tensors | 75 | Parts 4, 5 |
 | MXFP4 (gpt-oss, Granite) | `Mxfp4Config` | 80 | `mxfp4.py:67-77` |
-| GGUF | moved out of official main (vllm-gguf-plugin); the fork runs it on Kepler through the K80 int4 layout (#107) | — | Part 9.4; `vllm37:k80_gguf.py` |
+| GGUF | moved out of official main (vllm-gguf-plugin); the fork runs it on Kepler through the K80 GGUF kernels and the K80 int4 and int8 layouts (#107, #111, #109) | — | Part 9.4; `vllm37:k80_gguf.py` |
 
-**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74). GGUF files load too (#107): Q4_0, Q4_1 and Q4_K tensors use the same layout and kernels, and other types are dequantized at load. Everything else is BF16 safetensors, loaded as FP32 or FP16.
+**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74); int8 compressed-tensors and GPTQ checkpoints use the same layout with 4 values per word (#109). GGUF files load too (#107, #111): Q4_K and Q6_K run as stored, Q4_0, Q4_1 and Q8_0 tensors use the int4 or int8 layout, and other types are dequantized at load. Everything else is BF16 safetensors, loaded as FP32 or FP16.
 
 ### 1.5 Ranking by porting cost
 
@@ -1724,7 +1724,7 @@ When the hardware lacks a unit, rewrite the work as FP32 FMA and 32-bit integer 
 
 ### 9.4 What the fork runs (#73, #74)
 
-- **Layout (#73):** `K80Int4LinearKernel` (`kernels/mixed_precision/k80.py`) repacks compressed-tensors, GPTQ and AWQ int4 checkpoints at load into `qweight` int32 `[N, K/8]` plus FP32 scales and zeros per group.
+- **Layout (#73):** `K80Int4LinearKernel` (`kernels/mixed_precision/k80.py`) repacks compressed-tensors, GPTQ and AWQ int4 checkpoints at load into `qweight` int32 `[N, K/8]` plus FP32 scales and zeros per group (int8: `[N, K/4]`, #109 below).
 - **Kernels (#74):** `csrc/quantization/k80/int4.cu`. `k80_int4_gemm` serves up to 48 rows. One warp computes 4 or 8 output features. Each lane reads 1–4 packed words of every feature in one load, decodes each value with one `__byte_perm` into the mantissa of 2^23, and multiply-adds in FP32 against inputs held in registers (ollama37's `mmvq-k80.cu` shape). Above 48 rows, `k80_int4_dequantize` writes the weight in the activation dtype, bit for bit what the PyTorch reference gives, and cuBLAS multiplies.
 - **Read ceiling (plain `uint4` read kernel, each die, 875 MHz):** 157–159 GB/s read, 157 GB/s write, 140 GB/s copy.
 
@@ -1762,7 +1762,7 @@ End to end: offline, greedy, 128-token answers, 85 % of each die for vLLM (Mistr
 - **Same answers:** 71 of 72 Qwen3-0.6B texts (compressed-tensors, GPTQ, AWQ; float32, half, 2 dies) are word for word the #73 path's; perplexity matches to three decimals. The one that differs (GPTQ, half) branches at a near-tie after 102 characters.
 - **Not explained:** Qwen3-14B float32 is slower at 4 calls than at 2.
 
-GGUF (#107, #111): `quantization/k80_gguf.py` picks a path per GGUF tensor at load. Q4_K and Q6_K stay as stored and run on `csrc/quantization/k80/gguf.cu` (#111, below). Q4_0, Q4_1, and Q4_K on a build without those kernels, go into the K80 int4 layout with one fp32 scale and zero per 32 weights; Q4_K's `d·sc·q − dmin·m` becomes `zero = dmin·m / (d·sc)`. Other types (Q6_K, Q8_0, …) are dequantized to the model dtype, and F16 tensors are kept. A fused layer whose shards differ (Q4_K q and k, Q6_K v) runs as one piece per path. Embeddings and a tied LM head stay in the int4 layout when their type allows. **[measured]**
+GGUF (#107, #111): `quantization/k80_gguf.py` picks a path per GGUF tensor at load. Q4_K and Q6_K stay as stored and run on `csrc/quantization/k80/gguf.cu` (#111, below). Q4_0, Q4_1, and Q4_K on a build without those kernels, go into the K80 int4 layout with one fp32 scale and zero per 32 weights; Q4_K's `d·sc·q − dmin·m` becomes `zero = dmin·m / (d·sc)`. Q8_0 goes into the K80 int8 layout (#109, below). Other types (Q5_K, Q6_K without the GGUF kernels, …) are dequantized to the model dtype, and F16 tensors are kept. A fused layer whose shards differ (Q4_K q and k, Q6_K v) runs as one piece per path. Embeddings and a tied LM head stay in the int4 or int8 layout when their type allows. **[measured]**
 
 - **Decode:** Q4_0 is exact against the `gguf` package's dequantize; Q4_1 and Q4_K are within one FP32 rounding (1.2e-7 relative) on every tensor of three Qwen3-0.6B files.
 - **Against the same file dequantized on the CPU (Qwen3-0.6B):** in float32, Q4_0 and Q4_K_M give the same 8 texts and the same perplexity (29.8742, 29.8965), at TP=1 and TP=2. In half precision each gives 7 of 8 texts, branching at a near-tie, with perplexity within 0.01.
@@ -1791,9 +1791,42 @@ Dequantize rates count bytes read plus written. Error against float64: 2–4e-7 
 - **Against ollama37:** its CI decodes `deepseek-r1:8b` at 18.4 tok/s on one die (`speech-rewrite`, 865 prompt tokens); the runs above are offline with short prompts, so the two are not the same measure.
 - **Batches:** a second row of x costs Q6_K 15 % and Q4_K 80 %; Q4_K's lanes read their inputs in 16-byte pieces scattered over 4 blocks, which may be why.
 
+int8 weight-only (#109): the same layout with 4 values per word, `qweight` int32 `[N, K/4]`, each byte one value. `K80Int4LinearKernel` takes `uint8b128` (GPTQ 8-bit, compressed-tensors `W8A16` symmetric) and `uint8` (with zero points). Both kernels take the bit width: the product's byte permute places a byte directly, without the nibble masks, and each lane still covers 8, 16 or 32 inputs per step, so it loads 2, 4 or 8 words of each feature. GGUF Q8_0 blocks (`d`, 32 int8) become `q + 128` with zero 128 and scale `d`. Measured on one die (GPU1), group 128, half activations; `clock_sample.py` read the die at 745–797 MHz in most samples, down to 324 between runs. **[measured]**
+
+| Shape (N × K) | int4, 1 row | int8, 1 row | Packed read int4 / int8 | int4 / int8, 4 rows | int4 / int8, 8 rows |
+|---|---|---|---|---|---|
+| 4096 × 4096 | 101 µs | 147 µs | 93 / 121 GB/s | 229 / 238 µs | 429 / 413 µs |
+| 12288 × 4096 | 258 µs | 361 µs | 110 / 148 GB/s | 572 / 585 µs | 1,024 / 1,026 µs |
+| 4096 × 12288 | 240 µs | 386 µs | 118 / 139 GB/s | 523 / 550 µs | 984 / 850 µs |
+| 1024 × 4096 | 29 µs | 39 µs | 82 / 113 GB/s | 58 / 60 µs | 99 / 103 µs |
+
+- **Memory bound at 1 row:** int8 reads 113–148 GB/s of the 157–159 ceiling, and twice the bytes take 1.3–1.6× the time. From 4 rows the two take the same time, bound by the multiply-adds.
+- **Crossover unchanged:** for 4096 × 4096 in half precision, dequantize + cuBLAS overtakes the product between 56 and 64 rows for int8 as for int4 (int8: 2,160 against 2,195 µs at 56 rows, 2,466 against 2,187 at 64). The 1024- and 12288-feature shapes keep the product ahead up to 96 rows in both. int8 uses the same limit of 48 rows.
+- **Exact:** dequantize is bit-identical to the PyTorch reference in FP32 and FP16, and Q8_0 to the `gguf` package's dequantize. The product's error against float64 is within the int4 test's bounds (1e-5 FP32, 1e-3 FP16).
+
+End to end on one die (GPU1), offline, greedy, half precision unless noted, against the int4 and FP16 versions of the same model. Texts: of 8 greedy 48-token answers, how many are identical to FP16's. **[measured]**
+
+| Model | Weights | KV room (2,048-token requests at once) | tok/s at 1 / 2 / 4 calls | Perplexity | Texts as FP16 |
+|---|---|---|---|---|---|
+| Qwen3-4B FP16 | 7.56 GiB | 1.65 | 13.3 / 13.5 / 13.9 | 15.03 | — |
+| Qwen3-4B int8 (GPTQ, `JunHowie/Qwen3-4B-GPTQ-Int8`) | 4.39 GiB | 12.9 | 24.8 / 39.9 / 51.6 | 14.91 | 7 of 8 |
+| Qwen3-4B int4 (`RedHatAI/Qwen3-4B-quantized.w4a16`) | 2.65 GiB | 19.1 | 32.6 / 44.8 / 53.3 | 15.77 | 0 of 8 |
+| Qwen3-0.6B FP16 | 1.12 GiB | 31.6 | 70.7 / 79.6 / 85.0 | 25.57 | — |
+| Qwen3-0.6B int8 (GPTQ, `Qwen/Qwen3-0.6B-GPTQ-Int8`) | 0.76 GiB | 33.2 | 74.5 / 118.6 / 179.6 | 25.89 | 4 of 8 |
+| Qwen3-0.6B int8, float32 | 1.06 GiB | 16.1 | 66.0 / 122.6 / 236.4 | 25.90 | 4 of 8 |
+| Qwen3-0.6B int4 (`RedHatAI/…w4a16`) | 0.56 GiB | 34.1 | 76.4 / 120.5 / 183.1 | 28.53 | 0 of 8 |
+| Qwen3-0.6B GGUF Q8_0 (unsloth) | 0.73 GiB | 33.3 | 80.9 / 147.2 / 278.7 | 25.67 | 6 of 8 |
+| Qwen3-0.6B GGUF Q4_K_M (unsloth) | 0.38 GiB | 35.0 | 79.1 / 141.5 / 234.3 | 29.89 | 1 of 8 |
+| Qwen2.5-0.5B int8 (`RedHatAI/Qwen2.5-0.5B-quantized.w8a16`, compressed-tensors, per channel) | 0.59 GiB | 317 | 92.6 / 149.5 / 227.2 | 20.47 | (no FP16 run) |
+
+- **Quality:** int8 stays with FP16: Qwen3-4B int8 gives 7 of 8 FP16 texts and perplexity within 0.12; int4 gives none and adds 0.74. int8 in half and in float32 gives the same text for 7 of 8 prompts.
+- **Size and speed:** int8 Qwen3-4B takes 58 % of FP16's memory and decodes 1.9× faster on one die; int4 takes 35 % and decodes 2.5× faster at 1 call, about the same as int8 at 4 calls.
+- **Two dies (GPU0 + GPU1, TP=2, built ops):** Qwen3-4B int8 takes 2.19 GiB per die, decodes at 35.3 / 60.7 / 85.4 tok/s with room for 41 requests of 2,048 tokens, perplexity 14.90, and gives 7 of 8 of the one-die texts.
+- **GGUF Q8_0 runs faster than GPTQ int8** at 2–4 calls because its tied output layer is in the int8 layout too, while the GPTQ checkpoint keeps an FP16 output layer (`lm_head: false`), which cuBLAS multiplies slowly in half precision on the K80.
+
 ### 9.5 What is left
 
 - Q4_K for 2–16 rows: the product scales almost linearly with rows.
-- Q4_0, Q4_1, Q5_K and Q8_0 as stored; today they are repacked or dequantized.
-- An int8 (4 per word) variant: no int8 weight-only checkpoint reaches `K80Int4LinearKernel` yet.
+- Q4_0, Q4_1 and Q8_0 as stored; today they are repacked into the int4 and int8 layouts with an FP32 scale and zero per 32 weights. Q5_K is dequantized.
+- int8 at 8B and above: not run (Qwen3-8B int8 is about 8.6 GiB of weights, so one die leaves little room for context).
 - FP8 / FP4 weights decoded by bit operations, as weight-only formats.

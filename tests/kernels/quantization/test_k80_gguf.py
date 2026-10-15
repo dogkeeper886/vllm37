@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K80 fork (#107, #111): GGUF tensors on Kepler (repacked into the K80 int4
-layout, or read as stored by the K80 GGUF kernels), against the gguf package's
-dequantize.
+"""K80 fork (#107, #111, #109): GGUF tensors on Kepler (repacked into the K80
+int4 or int8 layout, or read as stored by the K80 GGUF kernels), against the
+gguf package's dequantize.
 
 Run on a Kepler GPU: pytest tests/kernels/quantization/test_k80_gguf.py
 """
@@ -29,7 +29,7 @@ def blocks(qtype, rows=ROWS, k=K, seed=0, flat=False):
     block, size = gguf.GGML_QUANT_SIZES[qtype]
     raw = rng.integers(0, 256, (rows, k // block, size), dtype=np.uint8)
     halves = {WeightType.Q4_0: 1, WeightType.Q4_1: 2, WeightType.Q4_K: 2,
-              WeightType.Q6_K: 0}[qtype]
+              WeightType.Q6_K: 0, WeightType.Q8_0: 1}[qtype]
     for h in range(halves):
         raw[..., 2 * h:2 * h + 2] = (rng.uniform(1e-4, 1e-2, raw.shape[:2])
                                      .astype(np.float16)[..., None]
@@ -69,6 +69,67 @@ def test_repack_matches_gguf(qtype, flat):
         out = torch.empty_like(w)
         ops.k80_int4_dequantize(out, q, s, z)
         assert torch.equal(out, w)
+
+
+def test_q8_0_repack_matches_gguf():
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.k80_gguf import (
+        k80_gguf_int8)
+    raw = blocks(WeightType.Q8_0)
+    q, s, z = k80_gguf_int8(torch.from_numpy(raw).cuda(), WeightType.Q8_0)
+    assert q.shape == (ROWS, K // 4) and s.shape == (ROWS, K // 32)
+    w = k80_int4_dequantize(q, s, z, torch.float32, 8)
+    # (q + 128 - 128) * d: no rounding to differ
+    assert torch.equal(w, ref(raw, WeightType.Q8_0))
+    if hasattr(torch.ops._C, "k80_int4_dequantize"):
+        out = torch.empty_like(w)
+        ops.k80_int4_dequantize(out, q, s, z, 8)
+        assert torch.equal(out, w)
+
+
+def _layer_of(raw, qtype):
+    """A GGUF layer with one unsharded tensor, as the loader leaves it."""
+    layer = torch.nn.Module()
+    qweight = torch.nn.Parameter(torch.from_numpy(raw).cuda(),
+                                 requires_grad=False)
+    qweight.shard_id, qweight.data_container = [], []
+    layer.qweight = qweight
+    qweight_type = torch.nn.Parameter(torch.zeros(1,
+                                                  dtype=torch.uint8,
+                                                  device="cuda"),
+                                      requires_grad=False)
+    qweight_type.weight_type = int(qtype)
+    layer.qweight_type = qweight_type
+    return layer
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("m", [1, 48, 49])
+def test_q8_0_linear_and_embedding(dtype, m):
+    """A Q8_0 layer and a Q8_0 embedding through the K80 int8 layout."""
+    from vllm.model_executor.layers.quantization.gguf import GGUFConfig
+    from vllm.model_executor.layers.quantization.k80_gguf import (
+        K80GGUFEmbeddingMethod, K80GGUFLinearMethod)
+    raw = blocks(WeightType.Q8_0, rows=96, seed=7)
+    method = K80GGUFLinearMethod(GGUFConfig())
+    method.params_dtype = dtype
+    layer = _layer_of(raw, WeightType.Q8_0)
+    method.process_weights_after_loading(layer)
+    assert [kind for kind, _ in layer.k80_gguf_parts] == [("int", 8)]
+    x = torch.randn(m, K, device="cuda").to(dtype)
+    y = method.apply(layer, x)
+    expected = x.double() @ ref(raw, WeightType.Q8_0).double().t()
+    tol = 1e-5 if dtype == torch.float32 else 2e-3
+    assert ((y.double() - expected).norm() / expected.norm()).item() < tol
+
+    raw = blocks(WeightType.Q8_0, rows=500, seed=8)
+    emb = K80GGUFEmbeddingMethod(GGUFConfig())
+    emb.params_dtype = torch.float32
+    layer = _layer_of(raw, WeightType.Q8_0)
+    emb.process_weights_after_loading(layer)
+    ids = torch.randint(0, 500, (m, ), device="cuda")
+    assert torch.equal(emb.embedding(layer, ids),
+                       ref(raw, WeightType.Q8_0)[ids])
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
@@ -113,7 +174,7 @@ def test_linear_mixed_shards(dtype, m):
     if hasattr(torch.ops._C, "k80_gguf_gemm"):  # Q4_K and Q6_K as stored
         assert kinds == ["gguf", "gguf", "dense"]
     else:
-        assert kinds == ["int4", "dense"]
+        assert kinds == ["int", "dense"]
     x = torch.randn(m, K, device="cuda").to(dtype)
     bias = torch.randn(192, device="cuda").to(dtype)
     y = method.apply(layer, x, bias)
@@ -167,24 +228,10 @@ def test_native_linear_and_embedding(m):
     from vllm.model_executor.layers.quantization.gguf import GGUFConfig
     from vllm.model_executor.layers.quantization.k80_gguf import (
         K80GGUFEmbeddingMethod, K80GGUFLinearMethod)
-
-    def layer_of(raw, qtype):
-        layer = torch.nn.Module()
-        qweight = torch.nn.Parameter(torch.from_numpy(raw).cuda(),
-                                     requires_grad=False)
-        qweight.shard_id, qweight.data_container = [], []
-        layer.qweight = qweight
-        qweight_type = torch.nn.Parameter(torch.zeros(1, dtype=torch.uint8,
-                                                      device="cuda"),
-                                          requires_grad=False)
-        qweight_type.weight_type = int(qtype)
-        layer.qweight_type = qweight_type
-        return layer
-
     raw = blocks(WeightType.Q4_K, rows=96, k=K, seed=5)
     method = K80GGUFLinearMethod(GGUFConfig())
     method.params_dtype = torch.float16
-    layer = layer_of(raw, WeightType.Q4_K)
+    layer = _layer_of(raw, WeightType.Q4_K)
     method.process_weights_after_loading(layer)
     x = torch.randn(m, K, device="cuda").half()
     y = method.apply(layer, x)
@@ -194,7 +241,7 @@ def test_native_linear_and_embedding(m):
     raw = blocks(WeightType.Q6_K, rows=500, k=K, seed=6)
     emb = K80GGUFEmbeddingMethod(GGUFConfig())
     emb.params_dtype = torch.float32
-    layer = layer_of(raw, WeightType.Q6_K)
+    layer = _layer_of(raw, WeightType.Q6_K)
     emb.process_weights_after_loading(layer)
     ids = torch.randint(0, 500, (m, ), device="cuda")
     assert torch.equal(emb.embedding(layer, ids),

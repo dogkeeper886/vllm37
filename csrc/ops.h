@@ -315,14 +315,14 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
 #ifndef USE_ROCM
-// K80 fork (#74): int4 weight-only kernels for Kepler.
+// K80 fork (#74, #109): int4 and int8 weight-only kernels for Kepler.
 torch::Tensor k80_int4_gemm(torch::Tensor const& x, torch::Tensor const& qweight,
                             torch::Tensor const& scales,
-                            torch::Tensor const& zeros);
+                            torch::Tensor const& zeros, int64_t bits);
 
 void k80_int4_dequantize(torch::Tensor& out, torch::Tensor const& qweight,
                          torch::Tensor const& scales,
-                         torch::Tensor const& zeros);
+                         torch::Tensor const& zeros, int64_t bits);
 
 // K80 fork (#111): GGUF Q4_K and Q6_K weights as stored, for Kepler.
 torch::Tensor k80_gguf_gemm(torch::Tensor const& x, torch::Tensor const& qweight,

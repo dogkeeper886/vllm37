@@ -217,10 +217,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         if (num_bits, sym) not in cls.TYPE_MAP:
             return False
 
-        # K80 fork (#73): Kepler runs symmetric int4 through
+        # K80 fork (#73, #109): Kepler runs symmetric int4 and int8 through
         # K80Int4LinearKernel, by way of this method.
         if on_kepler():
-            return num_bits == 4
+            return num_bits in (4, 8)
 
         return check_marlin_supported(quant_type=cls.TYPE_MAP[(num_bits, sym)],
                                       group_size=group_size)

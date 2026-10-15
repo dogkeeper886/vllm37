@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# K80 fork (#107, #111): GGUF checkpoints on Kepler (sm_37). The GGUF CUDA
-# kernels need dp4a and half2 math, which the K80 lacks, so each GGUF tensor
-# takes one of these paths at load time:
+# K80 fork (#107, #111, #109): GGUF checkpoints on Kepler (sm_37). The GGUF
+# CUDA kernels need dp4a and half2 math, which the K80 lacks, so each GGUF
+# tensor takes one of these paths at load time:
 #   Q4_K, Q6_K        kept as stored and run on the K80 GGUF kernels
 #       (csrc/quantization/k80/gguf.cu, #111): the fused product for up to
 #       K80_GGUF_GEMM_MAX_ROWS rows, else dequantize + an FP32 GEMM
 #   Q4_0, Q4_1 (and Q4_K without the GGUF kernels)  repacked into the K80
 #       int4 layout (kernels/mixed_precision/k80.py) with one fp32 scale and
 #       zero per 32 weights, and run on the K80 int4 kernels (#74)
-#   any other type    dequantized to the model dtype (Q8_0, ..., and Q6_K
+#   Q8_0              repacked into the K80 int8 layout (q + 128, zero 128)
+#       and run on the same kernels (#109)
+#   any other type    dequantized to the model dtype (Q5_K, ..., and Q6_K
 #       without the GGUF kernels) or kept (F16, BF16, F32), and run as an
 #       unquantized layer
 # A fused layer (QKV, gate-up) whose shards have different types runs as one
@@ -33,6 +35,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 logger = init_logger(__name__)
 
 K80_GGUF_INT4_TYPES = (WeightType.Q4_0, WeightType.Q4_1, WeightType.Q4_K)
+K80_GGUF_INT8_TYPES = (WeightType.Q8_0, )
 K80_GGUF_GROUP_SIZE = 32
 # Read as stored by the K80 GGUF kernels.
 K80_GGUF_NATIVE_TYPES = (WeightType.Q4_K, WeightType.Q6_K)
@@ -136,6 +139,24 @@ def k80_gguf_int4(raw: torch.Tensor, qtype: int):
             torch.cat(zeros).contiguous())
 
 
+def k80_gguf_int8(raw: torch.Tensor, qtype: int):
+    """A GGUF Q8_0 tensor [N, bytes] in the K80 int8 layout: qweight int32
+    [N, K / 4], scales and zeros fp32 [N, K / 32]. Q8_0 blocks are d and 32
+    int8 q, w = d * q; q + 128 (the byte with its top bit flipped) is stored
+    with zero 128, following ggml's dequantize_row_q8_0."""
+    assert qtype == WeightType.Q8_0
+    qweight, scales = [], []
+    for start in range(0, raw.shape[0], _CHUNK_ROWS):
+        blk = raw[start:start + _CHUNK_ROWS]
+        blk = blk.view(blk.shape[0], -1, 34)
+        q = (blk[..., 2:] ^ 0x80).reshape(blk.shape[0], -1)
+        qweight.append(q.contiguous().view(torch.int32))
+        scales.append(_f16(blk[..., 0:2]))
+    scales = torch.cat(scales).contiguous()
+    return (torch.cat(qweight).contiguous(), scales,
+            torch.full_like(scales, 128.0))
+
+
 def k80_gguf_dense(raw: torch.Tensor, qtype: int,
                    dtype: torch.dtype) -> torch.Tensor:
     """Any GGUF tensor [N, bytes] (or an unquantized [N, K]) as [N, K] in
@@ -161,8 +182,8 @@ def _shards(layer: torch.nn.Module) -> list[tuple[torch.Tensor, int]]:
 
 class K80GGUFLinearMethod(GGUFLinearMethod):
     """GGUF linear layers on Kepler: each piece of a layer is
-    ("gguf", (raw, qtype)), ("int4", (qweight, scales, zeros)) or
-    ("dense", (weight, ))."""
+    ("gguf", qtype): (raw, ), ("int", bits): (qweight, scales, zeros) or
+    ("dense", ): (weight, )."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # The loader moves parameters to the GPU for this call; a fused
@@ -175,7 +196,9 @@ class K80GGUFLinearMethod(GGUFLinearMethod):
             if self._gguf_ops is not None and qtype in K80_GGUF_NATIVE_TYPES:
                 kind, tensors = ("gguf", qtype), (raw.contiguous(), )
             elif qtype in K80_GGUF_INT4_TYPES:
-                kind, tensors = ("int4", ), k80_gguf_int4(raw, qtype)
+                kind, tensors = ("int", 4), k80_gguf_int4(raw, qtype)
+            elif qtype in K80_GGUF_INT8_TYPES:
+                kind, tensors = ("int", 8), k80_gguf_int8(raw, qtype)
             else:
                 kind = ("dense", )
                 tensors = (k80_gguf_dense(raw, qtype, self.params_dtype), )
@@ -191,7 +214,7 @@ class K80GGUFLinearMethod(GGUFLinearMethod):
         layer.k80_gguf_parts = parts
         self._gemm = dispatch_unquantized_gemm()
         self._ops = k80_int4_ops(K80_GGUF_GROUP_SIZE) if any(
-            kind == ("int4", ) for kind, _ in parts) else None
+            kind[0] == "int" for kind, _ in parts) else None
 
     def _gguf_matmul(self, layer: torch.nn.Module, x_2d: torch.Tensor,
                      raw: torch.Tensor, qtype: int) -> torch.Tensor:
@@ -225,10 +248,10 @@ class K80GGUFLinearMethod(GGUFLinearMethod):
             if kind[0] == "gguf":
                 outs.append(
                     self._gguf_matmul(layer, x_2d, tensors[0], kind[1]))
-            elif kind[0] == "int4":
+            elif kind[0] == "int":
                 outs.append(
                     k80_int4_matmul(layer, x_2d, *tensors, self._ops,
-                                    self._gemm))
+                                    self._gemm, None, kind[1]))
             else:
                 outs.append(self._gemm(layer, x_2d, tensors[0], None))
         out = outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
@@ -250,8 +273,9 @@ class K80GGUFEmbeddingMethod(K80GGUFLinearMethod):
                               dtype=self.params_dtype,
                               device=raw.device)
             self._gguf_ops.k80_gguf_dequantize(out, raw, kind[1])
-        elif kind[0] == "int4":
-            out = k80_int4_rows(*tensors, rows, self._ops, self.params_dtype)
+        elif kind[0] == "int":
+            out = k80_int4_rows(*tensors, rows, self._ops, self.params_dtype,
+                                kind[1])
         else:
             out = tensors[0].index_select(0, rows)
         return out.view(*x.shape, out.shape[-1])

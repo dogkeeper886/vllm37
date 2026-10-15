@@ -610,15 +610,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
 #ifndef USE_ROCM
-  // K80 fork (#74): int4 weight-only product and dequantize for Kepler, in
-  // the layout K80Int4LinearKernel repacks int4 checkpoints into.
+  // K80 fork (#74, #109): int4 and int8 weight-only product and dequantize
+  // for Kepler, in the layout K80Int4LinearKernel repacks checkpoints into.
   ops.def(
-      "k80_int4_gemm(Tensor x, Tensor qweight, Tensor scales, Tensor zeros) "
-      "-> Tensor");
+      "k80_int4_gemm(Tensor x, Tensor qweight, Tensor scales, Tensor zeros, "
+      "int bits=4) -> Tensor");
   ops.impl("k80_int4_gemm", torch::kCUDA, &k80_int4_gemm);
   ops.def(
       "k80_int4_dequantize(Tensor! out, Tensor qweight, Tensor scales, "
-      "Tensor zeros) -> ()");
+      "Tensor zeros, int bits=4) -> ()");
   ops.impl("k80_int4_dequantize", torch::kCUDA, &k80_int4_dequantize);
 
   // K80 fork (#111): product and dequantize for GGUF Q4_K and Q6_K weights

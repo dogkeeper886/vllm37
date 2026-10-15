@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# K80 fork (#73): weight-only int4 on Kepler (sm_37). Every other mixed-
-# precision kernel is built on an instruction the K80 lacks (half2 math, LOP3,
-# ldmatrix, mma.sync, cp.async, dp4a), so int4 checkpoints are repacked at load
-# time into one K80 layout:
-#   qweight  int32 [N, K / 8]  8 int4 values per word along K, value i of a
-#                              word in bits 4i..4i+3 (GPTQ and compressed-
-#                              tensors already pack this way; AWQ, packed
-#                              along N, is unpacked and packed again)
+# K80 fork (#73, #109): weight-only int4 and int8 on Kepler (sm_37). Every
+# other mixed-precision kernel is built on an instruction the K80 lacks (half2
+# math, LOP3, ldmatrix, mma.sync, cp.async, dp4a), so int4 and int8
+# checkpoints are repacked at load time into one K80 layout:
+#   qweight  int32 [N, K / P]  P = 32 / bits values per word along K (8 for
+#                              int4, 4 for int8), value i of a word in bits
+#                              (bits * i) and up (GPTQ and compressed-tensors
+#                              already pack this way; AWQ, packed along N, is
+#                              unpacked and packed again)
 #   scales   fp32  [N, K / group_size]
 #   zeros    fp32  [N, K / group_size]  w = (q - zero) * scale
 #   perm     int64 [K] or absent        act-order (g_idx) resolved at load by
@@ -42,7 +43,8 @@ K80_INT4_METHODS = ("compressed-tensors", "gptq_marlin", "awq_marlin")
 # AWQ packs along N; value i of a word is feature AWQ_PACK_ORDER[i] of its 8.
 AWQ_PACK_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 # Above this many rows dequantize + cuBLAS beats k80_int4_gemm: on a K80 die
-# the crossover is between 48 and 64 rows for 1024-11008 features (#74).
+# the crossover is between 48 and 64 rows for 1024-11008 features (#74), for
+# int8 as for int4 (#109).
 K80_INT4_GEMM_MAX_ROWS = 48
 
 
@@ -54,16 +56,21 @@ def on_kepler() -> bool:
     return capability is not None and capability.major < 5
 
 
-def k80_int4_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
+def k80_int4_dequantize(qweight: torch.Tensor,
+                        scales: torch.Tensor,
                         zeros: torch.Tensor,
-                        dtype: torch.dtype) -> torch.Tensor:
-    """The [N, K] weight of a layer in the K80 int4 layout, in `dtype`."""
+                        dtype: torch.dtype,
+                        bits: int = 4) -> torch.Tensor:
+    """The [N, K] weight of a layer in the K80 layout, in `dtype`."""
     n = qweight.shape[0]
-    k = qweight.shape[1] * 8
+    k = qweight.shape[1] * (32 // bits)
     groups = scales.shape[1]
-    # Little-endian: byte j of a row holds values 2j (low nibble) and 2j + 1.
+    # Little-endian: int8 value j of a row is byte j; for int4 byte j holds
+    # values 2j (low nibble) and 2j + 1.
     b = qweight.view(torch.uint8)
-    w = torch.stack((b & 15, b >> 4), dim=-1).view(n, groups, k // groups)
+    if bits == 4:
+        b = torch.stack((b & 15, b >> 4), dim=-1)
+    w = b.view(n, groups, k // groups)
     w = w.to(dtype)
     w.sub_(zeros.to(dtype).unsqueeze(-1)).mul_(scales.to(dtype).unsqueeze(-1))
     return w.view(n, k)
@@ -83,44 +90,54 @@ def k80_int4_ops(group_size: int):
     return ops if use else None
 
 
-def k80_int4_matmul(layer: torch.nn.Module, x_2d: torch.Tensor,
-                    qweight: torch.Tensor, scales: torch.Tensor,
-                    zeros: torch.Tensor, ops, gemm,
-                    bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """x_2d [M, K] times the transpose of an [N, K] weight in the K80 int4
-    layout. `ops` comes from k80_int4_ops(); `gemm` is the unquantized GEMM."""
+def k80_int4_matmul(layer: torch.nn.Module,
+                    x_2d: torch.Tensor,
+                    qweight: torch.Tensor,
+                    scales: torch.Tensor,
+                    zeros: torch.Tensor,
+                    ops,
+                    gemm,
+                    bias: Optional[torch.Tensor] = None,
+                    bits: int = 4) -> torch.Tensor:
+    """x_2d [M, K] times the transpose of an [N, K] weight in the K80 layout
+    of `bits`. `ops` comes from k80_int4_ops(); `gemm` is the unquantized
+    GEMM."""
     if ops is None:
-        weight = k80_int4_dequantize(qweight, scales, zeros, x_2d.dtype)
+        weight = k80_int4_dequantize(qweight, scales, zeros, x_2d.dtype, bits)
         return gemm(layer, x_2d, weight, bias)
     if x_2d.shape[0] <= K80_INT4_GEMM_MAX_ROWS:
         x_2d = x_2d.contiguous()
         if x_2d.data_ptr() % 16:
             x_2d = x_2d.clone()
-        out = ops.k80_int4_gemm(x_2d, qweight, scales, zeros)
+        out = ops.k80_int4_gemm(x_2d, qweight, scales, zeros, bits)
         if bias is not None:
             out.add_(bias)
         return out
-    weight = torch.empty((qweight.shape[0], qweight.shape[1] * 8),
+    weight = torch.empty((qweight.shape[0], x_2d.shape[1]),
                          dtype=x_2d.dtype,
                          device=x_2d.device)
-    ops.k80_int4_dequantize(weight, qweight, scales, zeros)
+    ops.k80_int4_dequantize(weight, qweight, scales, zeros, bits)
     return gemm(layer, x_2d, weight, bias)
 
 
-def k80_int4_rows(qweight: torch.Tensor, scales: torch.Tensor,
-                  zeros: torch.Tensor, rows: torch.Tensor, ops,
-                  dtype: torch.dtype) -> torch.Tensor:
-    """Rows `rows` of an [N, K] weight in the K80 int4 layout, in `dtype` (an
-    embedding lookup)."""
+def k80_int4_rows(qweight: torch.Tensor,
+                  scales: torch.Tensor,
+                  zeros: torch.Tensor,
+                  rows: torch.Tensor,
+                  ops,
+                  dtype: torch.dtype,
+                  bits: int = 4) -> torch.Tensor:
+    """Rows `rows` of an [N, K] weight in the K80 layout of `bits`, in
+    `dtype` (an embedding lookup)."""
     q = qweight.index_select(0, rows)
     s = scales.index_select(0, rows)
     z = zeros.index_select(0, rows)
     if ops is None:
-        return k80_int4_dequantize(q, s, z, dtype)
-    out = torch.empty((q.shape[0], q.shape[1] * 8),
+        return k80_int4_dequantize(q, s, z, dtype, bits)
+    out = torch.empty((q.shape[0], q.shape[1] * (32 // bits)),
                       dtype=dtype,
                       device=q.device)
-    ops.k80_int4_dequantize(out, q, s, z)
+    ops.k80_int4_dequantize(out, q, s, z, bits)
     return out
 
 
@@ -129,12 +146,13 @@ def _rows_out(t: torch.Tensor, output_dim: int) -> torch.Tensor:
     return t if output_dim == 0 else t.t()
 
 
-def _unpack(t: torch.Tensor, packed_dim: int,
+def _unpack(t: torch.Tensor, packed_dim: int, bits: int,
             order: Optional[list[int]]) -> torch.Tensor:
-    """int4 values of a packed tensor; value i of a word is feature order[i]
-    of its 8 (in sequence when order is None)."""
-    values = unpack_quantized_values_into_int32(t, scalar_types.uint4,
-                                                packed_dim)
+    """The values of a packed tensor; value i of a word is feature order[i]
+    of its 8 (in sequence when order is None; AWQ int4 only)."""
+    values = unpack_quantized_values_into_int32(
+        t, scalar_types.uint4 if bits == 4 else scalar_types.uint8,
+        packed_dim)
     if order is None:
         return values
     values = values.movedim(packed_dim, -1)
@@ -145,7 +163,10 @@ def _unpack(t: torch.Tensor, packed_dim: int,
 
 
 class K80Int4LinearKernel(MPLinearKernel):
-    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint4]
+    SUPPORTED_QUANT_TYPES = [
+        scalar_types.uint4b8, scalar_types.uint4, scalar_types.uint8b128,
+        scalar_types.uint8
+    ]
     # Which feature of its 8 each packed value holds, when not in sequence
     # (AWQ sets [0, 2, 4, 6, 1, 3, 5, 7]).
     pack_order: Optional[list[int]] = None
@@ -169,9 +190,10 @@ class K80Int4LinearKernel(MPLinearKernel):
         if k % 8 != 0 or k % group_size != 0:
             return False, (f"input features per die ({k}) must divide by 8 "
                            f"and by the group size ({group_size})")
-        if c.zero_points and n % 8 != 0:
-            return False, (f"output features per die ({n}) must divide by 8 "
-                           "to unpack the zero points")
+        pack = 32 // c.weight_type.size_bits
+        if c.zero_points and n % pack != 0:
+            return False, (f"output features per die ({n}) must divide by "
+                           f"{pack} to unpack the zero points")
         if c.has_g_idx and k != c.full_weight_shape[0]:
             return False, ("act-order (g_idx) is not supported when the "
                            "input features are split across dies")
@@ -181,13 +203,14 @@ class K80Int4LinearKernel(MPLinearKernel):
         c = self.config
         k, n = c.partition_weight_shape
         group_size = k if c.group_size == -1 else c.group_size
+        bits = c.weight_type.size_bits
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
 
         if w_q.packed_dim == w_q.input_dim and self.pack_order is None:
             qweight = _rows_out(w_q.data, w_q.output_dim)
         else:  # AWQ: packed along N, interleaved
             values = _rows_out(
-                _unpack(w_q.data, w_q.packed_dim, self.pack_order),
+                _unpack(w_q.data, w_q.packed_dim, bits, self.pack_order),
                 w_q.output_dim)
             qweight = pack_quantized_values_into_int32(values,
                                                        c.weight_type,
@@ -197,7 +220,7 @@ class K80Int4LinearKernel(MPLinearKernel):
         if c.zero_points:
             assert w_zp is not None
             zeros = _rows_out(
-                _unpack(w_zp.data, w_zp.packed_dim, self.pack_order),
+                _unpack(w_zp.data, w_zp.packed_dim, bits, self.pack_order),
                 w_zp.output_dim)
         else:
             zeros = torch.full_like(scales, c.weight_type.bias)
@@ -243,5 +266,6 @@ class K80Int4LinearKernel(MPLinearKernel):
             x_2d = x_2d.index_select(1, layer.k80_perm)
         out = k80_int4_matmul(layer, x_2d, layer.k80_qweight,
                               layer.k80_scales, layer.k80_zeros, self._ops,
-                              self._gemm, bias)
+                              self._gemm, bias,
+                              self.config.weight_type.size_bits)
         return out.reshape(x.shape[:-1] + (n, ))
