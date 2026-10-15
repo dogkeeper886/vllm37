@@ -295,10 +295,13 @@ if(VLLM_BUILD_LEGACY_CUDA)
     "csrc/quantization/gguf/gguf_kernel.cu")
 endif()
 
-# K80 fork (#74): int4 kernels for Kepler. Plain CUDA (no CUTLASS, no half
-# math), so every CUDA build has them, the legacy one included.
+# K80 fork (#74, #111): int4 and GGUF Q4_K/Q6_K kernels for Kepler. Plain
+# CUDA (no CUTLASS, no half math), so every CUDA build has them, the legacy
+# one included.
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_EXT_SRC "csrc/quantization/k80/int4.cu")
+  list(APPEND VLLM_EXT_SRC
+    "csrc/quantization/k80/int4.cu"
+    "csrc/quantization/k80/gguf.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" AND NOT VLLM_BUILD_LEGACY_CUDA)

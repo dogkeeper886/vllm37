@@ -1762,15 +1762,38 @@ End to end: offline, greedy, 128-token answers, 85 % of each die for vLLM (Mistr
 - **Same answers:** 71 of 72 Qwen3-0.6B texts (compressed-tensors, GPTQ, AWQ; float32, half, 2 dies) are word for word the #73 path's; perplexity matches to three decimals. The one that differs (GPTQ, half) branches at a near-tie after 102 characters.
 - **Not explained:** Qwen3-14B float32 is slower at 4 calls than at 2.
 
-GGUF (#107): `quantization/k80_gguf.py` converts each GGUF tensor at load. Q4_0, Q4_1 and Q4_K go into the K80 int4 layout with one fp32 scale and zero per 32 weights; Q4_K's `d·sc·q − dmin·m` becomes `zero = dmin·m / (d·sc)`. Other types (Q6_K, Q8_0, …) are dequantized to the model dtype, and F16 tensors are kept. A fused layer whose shards differ (Q4_K q and k, Q6_K v) runs as one piece per path. Embeddings and a tied LM head stay in the int4 layout when their type allows. **[measured]**
+GGUF (#107, #111): `quantization/k80_gguf.py` picks a path per GGUF tensor at load. Q4_K and Q6_K stay as stored and run on `csrc/quantization/k80/gguf.cu` (#111, below). Q4_0, Q4_1, and Q4_K on a build without those kernels, go into the K80 int4 layout with one fp32 scale and zero per 32 weights; Q4_K's `d·sc·q − dmin·m` becomes `zero = dmin·m / (d·sc)`. Other types (Q6_K, Q8_0, …) are dequantized to the model dtype, and F16 tensors are kept. A fused layer whose shards differ (Q4_K q and k, Q6_K v) runs as one piece per path. Embeddings and a tied LM head stay in the int4 layout when their type allows. **[measured]**
 
 - **Decode:** Q4_0 is exact against the `gguf` package's dequantize; Q4_1 and Q4_K are within one FP32 rounding (1.2e-7 relative) on every tensor of three Qwen3-0.6B files.
 - **Against the same file dequantized on the CPU (Qwen3-0.6B):** in float32, Q4_0 and Q4_K_M give the same 8 texts and the same perplexity (29.8742, 29.8965), at TP=1 and TP=2. In half precision each gives 7 of 8 texts, branching at a near-tie, with perplexity within 0.01.
 - **Weights, Qwen3-0.6B (float32 / half):** Q4_0 0.91 / 0.61 GiB, Q4_K_M 1.09 / 0.69 GiB, against 2.24 / 1.12 GiB unquantized. The Q6_K embedding (151,936 × 1,024), dequantized, is most of it.
-- **ollama's own files run** (`deepseek-r1:8b` and `llama3.1:8b`, Q4_K_M, from the ollama model store), but take more memory than the Hugging Face int4 checkpoint: 7.75 GiB of weights on one die against 5.99 GiB for `Qwen3-8B-quantized.w4a16`, so one die holds a 2,048-token context only at 95 % of the die. The 2 bits per weight of fp32 scale and zero per 32 weights and the dequantized Q6_K tensors (the output layer and half of `ffn_down`) cost it. Decode in half on one die: 14.8 tok/s (`deepseek-r1:8b`) and 15.9 (`llama3.1:8b`); `deepseek-r1:8b` on two dies 21.7.
+- **ollama's own files run** (`deepseek-r1:8b` and `llama3.1:8b`, Q4_K_M, from the ollama model store). Converted this way they took more memory than the Hugging Face int4 checkpoint: 7.75 GiB of weights on one die against 5.99 GiB for `Qwen3-8B-quantized.w4a16`, from the 2 bits per weight of fp32 scale and zero and the dequantized Q6_K tensors (the output layer and half of `ffn_down`). #111 removes both.
+
+GGUF Q4_K and Q6_K as stored (#111): `k80_gguf_gemm` follows ollama37's `mmvq-k80.cu` (4 Q4_K or 2 Q6_K features per warp, values decoded with `__byte_perm`, Q4_K's min term from sums of 16 inputs), with each decoded word reused for up to 8 rows of x. Above 16 rows, `k80_gguf_dequantize` writes FP32, bit for bit the `gguf` package's, and an FP32 GEMM multiplies even in half precision, in chunks of output features. Measured on one die against ollama's `deepseek-r1:8b` tensors and float64. **[measured]**
+
+| Tensor | 1 row | Packed read | 4 rows | 16 rows | Dequantize + cuBLAS, 16 rows | Dequantize FP32 / FP16 |
+|---|---|---|---|---|---|---|
+| Q4_K 4096 × 4096 | 135 µs | 70 GB/s | 508 µs | 1,671 µs | 1,923 µs | 122 / 88 GB/s |
+| Q4_K 12288 × 4096 | 237 µs | 120 GB/s | 978 µs | 3,898 µs | 4,858 µs | 148 / 120 GB/s |
+| Q6_K 4096 × 12288 | 375 µs | 110 GB/s | 715 µs | 2,269 µs | 5,331 µs | 144 / 142 GB/s |
+
+Dequantize rates count bytes read plus written. Error against float64: 2–4e-7 in FP32, 2e-4 in FP16. Dequantize is bit-identical in FP32 and FP16 on all five tensors tried, the 151,936-row output layer included.
+
+| Model (Q4_K_M), half precision | Dies | Weights per die | Context (tokens) | tok/s at 1 / 2 / 4 calls |
+|---|---|---|---|---|
+| `deepseek-r1:8b`, #107 path | 1 (95 % of the die) | 7.75 GiB | 10,048 | 14.8 / 18.9 / 20.3 |
+| `deepseek-r1:8b`, #111 | 1 | 4.95 GiB | 22,272 | 16.6 / 21.4 / 22.4 |
+| `deepseek-r1:8b`, #111 | 2 | 2.52 GiB | 79,840 | 23.8 / 34.4 / 40.2 |
+| `llama3.1:8b`, #111 | 1 | 4.65 GiB | 29,296 | 16.9 / 22.2 / 23.8 |
+
+- **Size:** 4.95 GiB is the file's own 5.2 GB (5.21 GB of tensors), so one die keeps 22,272 tokens of context at 85 % of the die. In float32 the same file takes 5.26 GiB on one die.
+- **Same answers:** Qwen3-0.6B Q4_K_M gives exactly the CPU-dequantized file's 8 texts and perplexity (29.896495) in float32, at TP=1 and TP=2. In half precision all 8 texts match too. Weights: 0.39 GiB, against 1.09 GiB on the #107 path.
+- **Against ollama37:** its CI decodes `deepseek-r1:8b` at 18.4 tok/s on one die (`speech-rewrite`, 865 prompt tokens); the runs above are offline with short prompts, so the two are not the same measure.
+- **Batches:** a second row of x costs Q6_K 15 % and Q4_K 80 %; Q4_K's lanes read their inputs in 16-byte pieces scattered over 4 blocks, which may be why.
 
 ### 9.5 What is left
 
-- GGUF at its own size: K80 kernels that read Q4_K and Q6_K blocks as stored (ollama37's `mmvq-k80.cu` shape), so a Q4_K_M file takes its own 5.2 GB, not 7.75 GiB.
+- Q4_K for 2–16 rows: the product scales almost linearly with rows.
+- Q4_0, Q4_1, Q5_K and Q8_0 as stored; today they are repacked or dequantized.
 - An int8 (4 per word) variant: no int8 weight-only checkpoint reaches `K80Int4LinearKernel` yet.
 - FP8 / FP4 weights decoded by bit operations, as weight-only formats.

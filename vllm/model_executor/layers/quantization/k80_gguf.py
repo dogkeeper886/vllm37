@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# K80 fork (#107): GGUF checkpoints on Kepler (sm_37). The GGUF CUDA kernels
-# need dp4a and half2 math, which the K80 lacks, so each GGUF tensor is
-# converted at load time:
-#   Q4_0, Q4_1, Q4_K  repacked into the K80 int4 layout (kernels/
-#       mixed_precision/k80.py) with one fp32 scale and zero per 32 weights,
-#       and run on the K80 int4 kernels (#74)
-#   any other type    dequantized to the model dtype (Q6_K, Q8_0, ...) or kept
-#       (F16, BF16, F32), and run as an unquantized layer
+# K80 fork (#107, #111): GGUF checkpoints on Kepler (sm_37). The GGUF CUDA
+# kernels need dp4a and half2 math, which the K80 lacks, so each GGUF tensor
+# takes one of these paths at load time:
+#   Q4_K, Q6_K        kept as stored and run on the K80 GGUF kernels
+#       (csrc/quantization/k80/gguf.cu, #111): the fused product for up to
+#       K80_GGUF_GEMM_MAX_ROWS rows, else dequantize + an FP32 GEMM
+#   Q4_0, Q4_1 (and Q4_K without the GGUF kernels)  repacked into the K80
+#       int4 layout (kernels/mixed_precision/k80.py) with one fp32 scale and
+#       zero per 32 weights, and run on the K80 int4 kernels (#74)
+#   any other type    dequantized to the model dtype (Q8_0, ..., and Q6_K
+#       without the GGUF kernels) or kept (F16, BF16, F32), and run as an
+#       unquantized layer
 # A fused layer (QKV, gate-up) whose shards have different types runs as one
 # piece per run of shards that share a path.
 
@@ -18,16 +22,46 @@ import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
 
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.gguf import (GGUFConfig,
                                                          GGUFLinearMethod)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
     k80_int4_matmul, k80_int4_ops, k80_int4_rows)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
+logger = init_logger(__name__)
+
 K80_GGUF_INT4_TYPES = (WeightType.Q4_0, WeightType.Q4_1, WeightType.Q4_K)
 K80_GGUF_GROUP_SIZE = 32
+# Read as stored by the K80 GGUF kernels.
+K80_GGUF_NATIVE_TYPES = (WeightType.Q4_K, WeightType.Q6_K)
+# Above this many rows dequantize + FP32 GEMM beats k80_gguf_gemm: on a K80
+# die the crossover is between 16 and 32 rows (#111).
+K80_GGUF_GEMM_MAX_ROWS = 16
 # Rows decoded at a time, to bound the load-time scratch memory.
 _CHUNK_ROWS = 4096
+# FP32 values dequantized at a time above K80_GGUF_GEMM_MAX_ROWS (256 MB), so
+# a large LM head never needs a full FP32 copy.
+_GEMM_CHUNK_ELEMS = 1 << 26
+
+
+def k80_gguf_ops():
+    """vllm._custom_ops when the K80 GGUF kernels are built and enabled,
+    else None (Q4_K and Q6_K take the #107 paths). Logs which, once."""
+    from vllm import _custom_ops as ops
+    use = envs.VLLM_K80_INT4_KERNEL and hasattr(torch.ops._C,
+                                                 "k80_gguf_gemm")
+    logger.info_once(
+        "K80 GGUF Q4_K and Q6_K tensors %s", "stay as stored (K80 GGUF "
+        "kernels)" if use else "are converted (no K80 GGUF kernels, or "
+        "VLLM_K80_INT4_KERNEL=0)")
+    return ops if use else None
+
+
+def _gguf_k(raw: torch.Tensor, qtype: int) -> int:
+    block, size = gguf.GGML_QUANT_SIZES[WeightType(qtype)]
+    return raw.shape[1] // size * block
 
 
 def _f16(b: torch.Tensor) -> torch.Tensor:
@@ -126,31 +160,60 @@ def _shards(layer: torch.nn.Module) -> list[tuple[torch.Tensor, int]]:
 
 
 class K80GGUFLinearMethod(GGUFLinearMethod):
-    """GGUF linear layers on Kepler, through the K80 int4 layout."""
+    """GGUF linear layers on Kepler: each piece of a layer is
+    ("gguf", (raw, qtype)), ("int4", (qweight, scales, zeros)) or
+    ("dense", (weight, ))."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # The loader moves parameters to the GPU for this call; a fused
         # layer's shards are in a list it does not move.
         device = layer.qweight_type.device
+        self._gguf_ops = k80_gguf_ops()
         parts = []
         for raw, qtype in _shards(layer):
             raw = raw.to(device)
-            int4 = qtype in K80_GGUF_INT4_TYPES
-            tensors = (k80_gguf_int4(raw, qtype) if int4 else
-                       (k80_gguf_dense(raw, qtype, self.params_dtype), ))
-            if parts and parts[-1][0] == int4:
-                parts[-1] = (int4,
+            if self._gguf_ops is not None and qtype in K80_GGUF_NATIVE_TYPES:
+                kind, tensors = ("gguf", qtype), (raw.contiguous(), )
+            elif qtype in K80_GGUF_INT4_TYPES:
+                kind, tensors = ("int4", ), k80_gguf_int4(raw, qtype)
+            else:
+                kind = ("dense", )
+                tensors = (k80_gguf_dense(raw, qtype, self.params_dtype), )
+            if parts and parts[-1][0] == kind:
+                parts[-1] = (kind,
                              tuple(
                                  torch.cat((a, b))
                                  for a, b in zip(parts[-1][1], tensors)))
             else:
-                parts.append((int4, tensors))
+                parts.append((kind, tensors))
         layer.qweight.data_container.clear()
         del layer.qweight
         layer.k80_gguf_parts = parts
         self._gemm = dispatch_unquantized_gemm()
         self._ops = k80_int4_ops(K80_GGUF_GROUP_SIZE) if any(
-            int4 for int4, _ in parts) else None
+            kind == ("int4", ) for kind, _ in parts) else None
+
+    def _gguf_matmul(self, layer: torch.nn.Module, x_2d: torch.Tensor,
+                     raw: torch.Tensor, qtype: int) -> torch.Tensor:
+        ops = self._gguf_ops
+        if x_2d.shape[0] <= K80_GGUF_GEMM_MAX_ROWS:
+            return ops.k80_gguf_gemm(x_2d.contiguous(), raw, qtype)
+        # Dequantize (bit for bit the gguf package's FP32) and multiply in
+        # FP32, which the K80 runs at twice its FP16 rate, a chunk of output
+        # features at a time.
+        k = _gguf_k(raw, qtype)
+        step = max(16, _GEMM_CHUNK_ELEMS // k // 16 * 16)
+        xf = x_2d.float()
+        outs = []
+        for n0 in range(0, raw.shape[0], step):
+            chunk = raw[n0:n0 + step]
+            w = torch.empty((chunk.shape[0], k),
+                            dtype=torch.float32,
+                            device=raw.device)
+            ops.k80_gguf_dequantize(w, chunk, qtype)
+            outs.append(self._gemm(layer, xf, w, None))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
+        return out.to(x_2d.dtype)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -158,8 +221,11 @@ class K80GGUFLinearMethod(GGUFLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         x_2d = x.reshape(-1, x.shape[-1])
         outs = []
-        for int4, tensors in layer.k80_gguf_parts:
-            if int4:
+        for kind, tensors in layer.k80_gguf_parts:
+            if kind[0] == "gguf":
+                outs.append(
+                    self._gguf_matmul(layer, x_2d, tensors[0], kind[1]))
+            elif kind[0] == "int4":
                 outs.append(
                     k80_int4_matmul(layer, x_2d, *tensors, self._ops,
                                     self._gemm))
@@ -176,9 +242,15 @@ class K80GGUFEmbeddingMethod(K80GGUFLinearMethod):
 
     def embedding(self, layer: torch.nn.Module,
                   x: torch.Tensor) -> torch.Tensor:
-        (int4, tensors), = layer.k80_gguf_parts
+        (kind, tensors), = layer.k80_gguf_parts
         rows = x.flatten()
-        if int4:
+        if kind[0] == "gguf":
+            raw = tensors[0].index_select(0, rows)
+            out = torch.empty((rows.shape[0], _gguf_k(raw, kind[1])),
+                              dtype=self.params_dtype,
+                              device=raw.device)
+            self._gguf_ops.k80_gguf_dequantize(out, raw, kind[1])
+        elif kind[0] == "int4":
             out = k80_int4_rows(*tensors, rows, self._ops, self.params_dtype)
         else:
             out = tensors[0].index_select(0, rows)

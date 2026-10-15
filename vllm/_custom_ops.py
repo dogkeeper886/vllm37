@@ -444,6 +444,25 @@ if hasattr(torch.ops._C, "k80_int4_gemm"):
         return x.new_empty((x.size(0), qweight.size(0)))
 
 
+# K80 fork (#111): GGUF Q4_K and Q6_K weights as stored, on Kepler.
+def k80_gguf_gemm(x: torch.Tensor, qweight: torch.Tensor,
+                  qtype: int) -> torch.Tensor:
+    return torch.ops._C.k80_gguf_gemm(x, qweight, qtype)
+
+
+def k80_gguf_dequantize(out: torch.Tensor, qweight: torch.Tensor,
+                        qtype: int) -> None:
+    torch.ops._C.k80_gguf_dequantize(out, qweight, qtype)
+
+
+if hasattr(torch.ops._C, "k80_gguf_gemm"):
+
+    @register_fake("_C::k80_gguf_gemm")
+    def _k80_gguf_gemm_fake(x: torch.Tensor, qweight: torch.Tensor,
+                            qtype: int) -> torch.Tensor:
+        return x.new_empty((x.size(0), qweight.size(0)))
+
+
 # marlin
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,

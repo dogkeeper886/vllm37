@@ -323,6 +323,13 @@ torch::Tensor k80_int4_gemm(torch::Tensor const& x, torch::Tensor const& qweight
 void k80_int4_dequantize(torch::Tensor& out, torch::Tensor const& qweight,
                          torch::Tensor const& scales,
                          torch::Tensor const& zeros);
+
+// K80 fork (#111): GGUF Q4_K and Q6_K weights as stored, for Kepler.
+torch::Tensor k80_gguf_gemm(torch::Tensor const& x, torch::Tensor const& qweight,
+                            int64_t type);
+
+void k80_gguf_dequantize(torch::Tensor& out, torch::Tensor const& qweight,
+                         int64_t type);
 #endif
 
 void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
