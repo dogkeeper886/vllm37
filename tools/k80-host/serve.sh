@@ -9,7 +9,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 export VLLM_USE_V1=0 VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} TORCHDYNAMO_DISABLE=1 \
-       NCCL_P2P_DISABLE=1 VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONUNBUFFERED=1
+       NCCL_P2P_LEVEL=PIX VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONUNBUFFERED=1
 eager=(--enforce-eager)
 [ "${VLLM_K80_CUDA_GRAPHS:-0}" = 1 ] && eager=()
 exec python -m vllm.entrypoints.openai.api_server \
