@@ -3,6 +3,7 @@
  * answer and not garbage?
  *
  *   npx tsx test.ts [--test NAME] [--prompt a,b] [--calls 1,2] [--stagger 0,20]
+ *                   [--dies 2] [--start-temp 50] [--stop-temp 80]
  *                   [--output results/replies.json]
  *
  * Talks to a server that is already up (VLLM37_HOST, default localhost:8000);
@@ -13,13 +14,23 @@
  *   --stagger  tokens a call has streamed before the next is sent; 0 sends the
  *              calls together                         (default 0)
  *
+ * and the dies, one value each (lib/dies.ts):
+ *
+ *   --dies        how many dies the server takes, GPU0 first        (default 1)
+ *   --start-temp  °C every one of them must be at or below before an
+ *                 option starts                                     (default 50)
+ *   --stop-temp   °C at which a die makes the option invalid         (default 80)
+ *
  * Sends short-answer first, the one reply with a finished answer, then the timed
- * calls: one option per combination of the listed values. Every reply is checked
- * here and judged by report.ts once the GPUs are back.
+ * calls: one option per combination of the listed values. Each option waits for
+ * the dies to cool first, and records each die's clock, temperature and throttle
+ * flags while it runs. Every reply is checked here and judged by report.ts once
+ * the GPUs are back.
  */
+import { dieNames, watchDies } from './lib/dies.js';
 import { promptNames } from './lib/prompts.js';
 import { arg, forEachOption, runTest, type Result } from './lib/run.js';
-import { generate, served } from './lib/vllm.js';
+import { generate, served, type GenerateOptions } from './lib/vllm.js';
 
 const list = (name: string, fallback: string): string[] =>
   (arg(name) || fallback).split(',').map((s) => s.trim()).filter(Boolean);
@@ -34,6 +45,14 @@ const unknown = prompts.filter((p) => !promptNames().includes(p));
 if (unknown.length) throw new Error(`--prompt must be one of ${promptNames().join(', ')}, got "${unknown.join(', ')}"`);
 const calls = counts('calls', '1', 1);
 const stagger = counts('stagger', '0', 0);
+const one = (name: string, fallback: string, min: number): number => {
+  const v = counts(name, fallback, min);
+  if (v.length !== 1) throw new Error(`--${name} takes one value, got "${v.join(',')}"`);
+  return v[0];
+};
+const dies = watchDies(one('dies', '1', 1), { startC: one('start-temp', '50', 1), stopC: one('stop-temp', '80', 1) });
+const { startC, stopC } = dies.rule;
+if (stopC <= startC) throw new Error(`--stop-temp (${stopC}) must be above --start-temp (${startC})`);
 
 // One option per combination, named by the inputs that hold more than one value.
 const options = prompts.flatMap((prompt) => calls.flatMap((n) => stagger.map((after) => ({ prompt, calls: n, stagger: after }))));
@@ -44,17 +63,34 @@ const label = (o: (typeof options)[number]): string =>
     stagger.length > 1 ? `stagger=${o.stagger}` : '',
   ].filter(Boolean).join(', ') || o.prompt;
 
-const about = `Inputs: prompt=${prompts.join(',')}; calls=${calls.join(',')}; stagger=${stagger.join(',')}.`;
+const about = `Inputs: prompt=${prompts.join(',')}; calls=${calls.join(',')}; stagger=${stagger.join(',')}. ` +
+  `Each option starts with ${dieNames(dies.rule.dies)} at or below ${startC} °C; a die at ${stopC} °C or a fault flag makes it invalid.`;
+
+/** One option's calls, sent once the dies are cool, with what the dies did meanwhile. */
+async function timed(option: string, name: string, opts?: GenerateOptions): Promise<Result[]> {
+  const gate = await dies.cool();
+  process.stderr.write(`  dies after ${gate.waitedS} s: ${Object.entries(gate.startC).map(([d, c]) => `GPU${d} ${c} °C`).join(', ')}\n`);
+  const from = Date.now();
+  const results = await generate(option, name, opts);
+  const state = dies.state(from, Date.now(), gate);
+  if (!state.valid) process.stderr.write(`  INVALID die state: ${state.reason}\n`);
+  for (const r of results) r.dies = state;
+  return results;
+}
 
 await runTest(arg('test') ?? 'test', about, async () => {
-  const { maxModelLen } = await served();
-  // A prompt that did not fit the context was cut, so the reply answers a prompt nobody sent.
-  const fits = (r: Result): void => {
-    if (maxModelLen) r.checks.window = { pass: r.metrics.inTokens + r.metrics.outTokens <= maxModelLen, reason: `${r.metrics.inTokens} of ${maxModelLen} tokens` };
-  };
-  (await generate('model test', 'short-answer')).forEach(fits);
-  await forEachOption(options.map(label), async (name, i) => {
-    const o = options[i];
-    (await generate(name, o.prompt, { calls: o.calls, stagger: o.stagger })).forEach(fits);
-  });
-});
+  try {
+    const { maxModelLen } = await served();
+    // A prompt that did not fit the context was cut, so the reply answers a prompt nobody sent.
+    const fits = (r: Result): void => {
+      if (maxModelLen) r.checks.window = { pass: r.metrics.inTokens + r.metrics.outTokens <= maxModelLen, reason: `${r.metrics.inTokens} of ${maxModelLen} tokens` };
+    };
+    (await timed('model test', 'short-answer')).forEach(fits);
+    await forEachOption(options.map(label), async (name, i) => {
+      const o = options[i];
+      (await timed(name, o.prompt, { calls: o.calls, stagger: o.stagger })).forEach(fits);
+    });
+  } finally {
+    dies.close();
+  }
+}, dies.rule);

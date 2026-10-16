@@ -21,6 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Reply, Verdict } from './check.js';
+import type { DieRule, DieState } from './dies.js';
 import type { Judgment } from './judge.js';
 
 export interface Result {
@@ -40,6 +41,8 @@ export interface Result {
   /** `not-judged`: the script check already failed it, so it was never sent. Never passes. */
   judge: Judgment | { verdict: 'pending' | 'not-judged'; reason: string };
   pass: boolean;
+  /** The dies while the option ran; an invalid one's tok/s says nothing about the server. */
+  dies?: DieState;
 }
 
 type Recorded = Omit<Result, 'checks' | 'judge' | 'pass'> & { check: Verdict };
@@ -54,6 +57,8 @@ export interface Replies {
   results: Result[];
   errors: { option: string; error: string }[];
   bodyError?: string;
+  /** The temperatures each option was held to (lib/dies.ts). */
+  dieRule?: DieRule;
 }
 
 let current: Pick<Replies, 'test' | 'results' | 'errors'> | undefined;
@@ -102,7 +107,7 @@ export function save(path: string, value: unknown): void {
  * The test half: run `body`, which talks to a server that is already up, and
  * write every reply it recorded. `about` is the one line under the title.
  */
-export async function runTest(test: string, about: string, body: () => Promise<void>): Promise<never> {
+export async function runTest(test: string, about: string, body: () => Promise<void>, dieRule?: DieRule): Promise<never> {
   current = { test, results: [], errors: [] };
   const run = current;
   let bodyError: string | undefined;
@@ -116,7 +121,7 @@ export async function runTest(test: string, about: string, body: () => Promise<v
   const commit = process.env.GITHUB_SHA ?? spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }).stdout?.trim() ?? '';
   const replies: Replies = {
     test, about, commit, runId: process.env.GITHUB_RUN_ID ?? '', date: new Date().toISOString(),
-    results: run.results, errors: run.errors, bodyError,
+    results: run.results, errors: run.errors, bodyError, dieRule,
   };
   save(arg('output') ?? 'results/replies.json', replies);
 

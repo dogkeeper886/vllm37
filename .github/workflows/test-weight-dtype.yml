@@ -47,6 +47,10 @@ jobs:
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
       VLLM_LOG_DIR: /tmp/k80-ci-logs
+      # Each option starts once its dies read TEST_START_TEMP °C or less; a die
+      # at TEST_STOP_TEMP °C, or a throttle flag, makes its tok/s invalid.
+      TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '50' }}
+      TEST_STOP_TEMP: ${{ vars.TEST_STOP_TEMP || '80' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: ./.github/actions/test
