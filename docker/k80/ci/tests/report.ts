@@ -12,12 +12,15 @@
  * The report fails on a failed check, a "yes" to the garbage question, an
  * abstain, an option that errored, a run that recorded no reply at all, or a
  * missing replies file -- "0 failed" means every reply was checked and judged.
+ * A hot die does not fail it: the replies still count, and the row's tok/s is
+ * struck through as invalid (lib/dies.ts).
  */
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { readable } from './lib/check.js';
+import { dieNames } from './lib/dies.js';
 import { closeJudge, judge, judgeReady } from './lib/judge.js';
-import { arg, save, type Replies } from './lib/run.js';
+import { arg, save, type Replies, type Result } from './lib/run.js';
 
 if (process.argv.includes('--ready')) {
   try {
@@ -73,8 +76,22 @@ const judged = run.results.filter((r) => r.judge.verdict === 'yes' || r.judge.ve
 const abstained = run.results.filter((r) => r.judge.verdict === 'abstain').length;
 const notJudged = run.results.filter((r) => r.judge.verdict === 'not-judged').length;
 const empty = run.results.length === 0;
+const invalid = run.results.filter((r) => r.dies && !r.dies.valid).length;
 const server = serverLine();
 const cell = (s: string) => s.replace(/\s+/g, ' ').replace(/\|/g, '\\|');
+
+/** Each die while the option ran: median SM clock, °C at the start and peak, and any flag but idle. */
+function diesCell(r: Result): string {
+  if (!r.dies) return '—';
+  const each = r.dies.dies.map((d) => {
+    const flags = d.flags.filter((f) => f !== 'idle');
+    return `GPU${d.die} ${d.medianMhz} MHz, ${d.startC}→${d.peakC} °C${flags.length ? `, ${flags.join('+')}` : ''}`;
+  }).join('; ');
+  return r.dies.valid ? each : `**invalid**: ${r.dies.reason}; ${each}`;
+}
+/** An invalid option's speed is struck through: it measured the die, not the server. */
+const tps = (r: Result, v: unknown) => (r.dies && !r.dies.valid ? `~~${v}~~` : String(v));
+const rule = run.dieRule;
 
 const lines = [
   '',
@@ -82,18 +99,23 @@ const lines = [
   '',
   ...(run.about ? [run.about, ''] : []),
   `**${run.results.length} reply(s), ${judged} judged, ${abstained} abstained, ${notJudged} failed the check, ${failed} failed**` +
-    (empty ? ' — no reply was recorded, so nothing was tested' : ''),
+    (empty ? ' — no reply was recorded, so nothing was tested' : '') +
+    (invalid ? `; **${invalid} with an invalid die state**, their tok/s struck through` : ''),
   '',
-  '| Option | Model | Prompt | Checks | Judge | Pass | Prefill tok/s | Decode tok/s | In / out tok | More | Reply |',
-  '|---|---|---|---|---|---|---|---|---|---|---|',
+  '| Option | Model | Prompt | Checks | Judge | Pass | Prefill tok/s | Decode tok/s | Dies | In / out tok | More | Reply |',
+  '|---|---|---|---|---|---|---|---|---|---|---|---|',
   ...run.results.map((r) => {
     const checks = Object.entries(r.checks).map(([k, v]) => `${k}: ${v.pass ? 'ok' : v.reason}`).join('; ');
     const { inTokens, outTokens, prefillTps, decodeTps, ...more } = r.metrics;
-    const extra = Object.entries(more).map(([k, v]) => `${k}=${v}`).join(' ');
-    return `| ${r.option} | ${r.model} | ${r.prompt} | ${cell(checks)} | ${cell(r.judge.reason)} | ${r.pass ? 'PASS' : 'FAIL'} | ${prefillTps} | ${decodeTps} | ${inTokens} / ${outTokens} | ${extra} | ${cell(readable(r.reply)).slice(0, 80)} |`;
+    const extra = Object.entries(more).map(([k, v]) => `${k}=${k === 'totalDecodeTps' ? tps(r, v) : v}`).join(' ');
+    return `| ${r.option} | ${r.model} | ${r.prompt} | ${cell(checks)} | ${cell(r.judge.reason)} | ${r.pass ? 'PASS' : 'FAIL'} | ${tps(r, prefillTps)} | ${tps(r, decodeTps)} | ${cell(diesCell(r))} | ${inTokens} / ${outTokens} | ${extra} | ${cell(readable(r.reply)).slice(0, 80)} |`;
   }),
-  ...run.errors.map((e) => `| ${e.option} | — | — | error: ${cell(e.error).slice(0, 120)} | — | FAIL | — | — | — | — | — |`),
+  ...run.errors.map((e) => `| ${e.option} | — | — | error: ${cell(e.error).slice(0, 120)} | — | FAIL | — | — | — | — | — | — |`),
   '',
+  ...(rule
+    ? [`Dies: each option started once ${dieNames(rule.dies)} read ${rule.startC} °C or less (waiting up to ${rule.coolTimeoutS} s), and shows each die's median SM clock, and its temperature at the start and at the peak, while it ran. ` +
+        `A die at ${rule.stopC} °C, or a sw-power-cap, hw-slowdown, sw-thermal, hw-thermal or power-brake flag, makes the option's tok/s invalid. Read with nvidia-smi; nothing was set.`, '']
+    : []),
   ...(server ? [server] : []),
   `Commit ${run.commit.slice(0, 9)}.`,
   ...(run.bodyError ? ['', `Run error: ${run.bodyError}`] : []),
@@ -103,5 +125,5 @@ const md = lines.join('\n');
 process.stdout.write(md + '\n');
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
 
-save(arg('output') ?? 'results/report.json', { ...run, judged, abstained, notJudged, failed });
+save(arg('output') ?? 'results/report.json', { ...run, judged, abstained, notJudged, failed, invalid });
 process.exit(failed > 0 || empty || run.bodyError ? 1 : 0);

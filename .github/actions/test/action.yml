@@ -4,8 +4,9 @@ description: >
   runtime check, the judge check, the server start and the test itself.
   Always follow it with the test-end action under `if: always()`, which stops
   the server, gives the GPUs back and judges the replies. The job that uses
-  this sets the runner, the k80-hardware lock, the time limit and the judge
-  settings (JUDGE_BASE_URL, JUDGE_MODEL), which an action cannot set.
+  this sets the runner, the k80-hardware lock, the time limit, the judge
+  settings (JUDGE_BASE_URL, JUDGE_MODEL) and the die temperatures
+  (TEST_START_TEMP, TEST_STOP_TEMP), which an action cannot set.
 
   One question for every run: under the condition the inputs set, does vllm37
   still give a real answer and not garbage?
@@ -87,4 +88,10 @@ runs:
         PROMPT: ${{ inputs.prompt }}
         CALLS: ${{ inputs.calls }}
         STAGGER: ${{ inputs.stagger }}
-      run: npx tsx test.ts --test "$TEST" --prompt "$PROMPT" --calls "$CALLS" --stagger "$STAGGER" --output results/replies.json
+        DIES: ${{ inputs.dies }}
+      # Each option waits for its dies to cool and records their clocks and
+      # temperatures (lib/dies.ts); empty temperatures take test.ts's defaults.
+      run: >-
+        npx tsx test.ts --test "$TEST" --prompt "$PROMPT" --calls "$CALLS" --stagger "$STAGGER"
+        --dies "$DIES" --start-temp "${TEST_START_TEMP:-}" --stop-temp "${TEST_STOP_TEMP:-}"
+        --output results/replies.json

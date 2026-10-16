@@ -7,7 +7,8 @@
  * test-end action uploads them, one row per option of each test. NEEDS, the
  * workflow's needs context, names the jobs that left no report. It judges
  * nothing and fails nothing: each test job already passed or failed on its
- * judged replies.
+ * judged replies. An option whose dies ran hot or throttled has its tok/s
+ * struck through and counts in no total.
  */
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,11 +44,17 @@ for (const { report, server } of runs) {
     const judged = results.filter((r) => r.judge.verdict === 'yes' || r.judge.verdict === 'no').length;
     const failed = results.filter((r) => !r.pass).length + errors.length;
     const m = results[0]?.metrics;
-    const decode = m ? String(m.totalDecodeTps ?? m.decodeTps) : '—';
-    rows.push(`| ${report.test} | ${cell(option)}; ${served(server)} | ${results.length} | ${judged} | ${failed} | ${decode} | ${build(server)} |`);
+    const d = results[0]?.dies;
+    const total = m ? String(m.totalDecodeTps ?? m.decodeTps) : '—';
+    const decode = m && d && !d.valid ? `~~${total}~~` : total;
+    const dies = d
+      ? `${d.valid ? '' : `**invalid**: ${d.reason}; `}peak ${Math.max(...d.dies.map((x) => x.peakC))} °C, ` +
+        `clock ≥ ${Math.min(...d.dies.map((x) => x.medianMhz))} MHz`
+      : '—';
+    rows.push(`| ${report.test} | ${cell(option)}; ${served(server)} | ${results.length} | ${judged} | ${failed} | ${decode} | ${cell(dies)} | ${build(server)} |`);
   }
   if (!options.length) {
-    rows.push(`| ${report.test} | ${cell(report.bodyError ?? 'no reply')}; ${served(server)} | 0 | 0 | 1 | — | ${build(server)} |`);
+    rows.push(`| ${report.test} | ${cell(report.bodyError ?? 'no reply')}; ${served(server)} | 0 | 0 | 1 | — | — | ${build(server)} |`);
   }
 }
 
@@ -60,11 +67,12 @@ const md = [
   '## All tests',
   '',
   ...(models.length ? [`Model: ${models.join('; ')}.`, ''] : []),
-  '| Job | Condition | Replies | Judged | Failed | Decode tok/s | Build |',
-  '|---|---|---|---|---|---|---|',
-  ...(rows.length ? rows : ['| — | no report was uploaded | — | — | — | — | — |']),
+  '| Job | Condition | Replies | Judged | Failed | Decode tok/s | Dies | Build |',
+  '|---|---|---|---|---|---|---|---|',
+  ...(rows.length ? rows : ['| — | no report was uploaded | — | — | — | — | — | — |']),
   '',
   'Decode tok/s is the total of all calls in the option. Failed counts the replies that failed a check or the judge, and the errors.',
+  'Dies: the hottest die\'s peak temperature and the lowest median SM clock while the option ran. A struck-through tok/s is invalid: a die ran hot or throttled, so it measured the die, not the server.',
   ...(jobs.length ? ['', `Jobs: ${jobs.join(' · ')}.`] : []),
   '',
 ].join('\n');
