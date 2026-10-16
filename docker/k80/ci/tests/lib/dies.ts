@@ -137,7 +137,9 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
         reasons.push(`started above ${rule.startC} °C after ${gate.waitedS} s (${rule.dies.map((d) => `GPU${d} ${gate.startC[d]} °C`).join(', ')})`);
       }
       const dies = rule.dies.map((die) => {
-        const x = samples.filter((s) => s.die === die && s.t >= from && s.t <= to);
+        let x = samples.filter((s) => s.die === die && s.t >= from && s.t <= to);
+        // A window shorter than one pass over the dies: the last reading before it ends.
+        if (!x.length) x = samples.filter((s) => s.die === die && s.t <= to).slice(-1);
         if (!x.length) {
           reasons.push(`no sample of GPU${die}${failure ? `: ${failure}` : ''}`);
           return { die, startC: gate.startC[die], medianMhz: 0, minMhz: 0, peakC: 0, meanW: 0, flags: [] };
