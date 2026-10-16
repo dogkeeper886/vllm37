@@ -18,7 +18,7 @@
  *
  *   --dies        how many dies the server takes, GPU0 first        (default 1)
  *   --start-temp  °C every one of them must be at or below before an
- *                 option starts                                     (default 50)
+ *                 option starts                                     (default 60)
  *   --stop-temp   °C at which a die makes the option invalid         (default 80)
  *
  * Sends short-answer first, the one reply with a finished answer, then the timed
@@ -50,7 +50,7 @@ const one = (name: string, fallback: string, min: number): number => {
   if (v.length !== 1) throw new Error(`--${name} takes one value, got "${v.join(',')}"`);
   return v[0];
 };
-const dies = watchDies(one('dies', '1', 1), { startC: one('start-temp', '50', 1), stopC: one('stop-temp', '80', 1) });
+const dies = watchDies(one('dies', '1', 1), { startC: one('start-temp', '60', 1), stopC: one('stop-temp', '80', 1) });
 const { startC, stopC } = dies.rule;
 if (stopC <= startC) throw new Error(`--stop-temp (${stopC}) must be above --start-temp (${startC})`);
 

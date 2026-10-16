@@ -4,7 +4,7 @@
  * lowers it at the 149 W cap, and the hardware slows a die to about 400 MHz at
  * 88 °C, so a tok/s from a hot die measures the throttle, not the server.
  *
- *   const dies = watchDies(2, { startC: 50, stopC: 80 })   nvidia-smi -lms 100, dies 0-1
+ *   const dies = watchDies(2, { startC: 60, stopC: 80 })   nvidia-smi -lms 100, dies 0-1
  *   const gate = await dies.cool()                         every die ≤ startC, or a timeout
  *   ... the option's calls, from → to ...
  *   dies.state(from, to, gate)                             per die: clock, °C, W, flags
@@ -14,6 +14,11 @@
  *
  * Reads only: nvidia-smi is asked, never set; no clock, power limit or
  * application clock changes.
+ *
+ * Why 60 °C to start: a die that holds a loaded server sits at 562 MHz and
+ * 59-73 W with no request, and levels off at 51-55 °C (measured on #115); it
+ * never reaches the 35-43 °C of a die with nothing loaded. 80 °C to stop
+ * leaves 8 °C before the 88 °C slowdown, about 20 s at the fastest rise seen.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -89,7 +94,7 @@ export interface Dies {
 }
 
 export function watchDies(count: number, opts: { startC: number; stopC: number; coolTimeoutS?: number; intervalMs?: number }): Dies {
-  const rule: DieRule = { dies: [...Array(count).keys()], startC: opts.startC, stopC: opts.stopC, coolTimeoutS: opts.coolTimeoutS ?? 600 };
+  const rule: DieRule = { dies: [...Array(count).keys()], startC: opts.startC, stopC: opts.stopC, coolTimeoutS: opts.coolTimeoutS ?? 300 };
   const samples: Sample[] = [];
   const latest = new Map<number, Sample>();
   let failure = '';

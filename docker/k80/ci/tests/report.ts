@@ -80,12 +80,12 @@ const invalid = run.results.filter((r) => r.dies && !r.dies.valid).length;
 const server = serverLine();
 const cell = (s: string) => s.replace(/\s+/g, ' ').replace(/\|/g, '\\|');
 
-/** Each die while the option ran: median SM clock, peak °C and any flag but idle. */
+/** Each die while the option ran: median SM clock, °C at the start and peak, and any flag but idle. */
 function diesCell(r: Result): string {
   if (!r.dies) return '—';
   const each = r.dies.dies.map((d) => {
     const flags = d.flags.filter((f) => f !== 'idle');
-    return `GPU${d.die} ${d.medianMhz} MHz, ${d.peakC} °C${flags.length ? `, ${flags.join('+')}` : ''}`;
+    return `GPU${d.die} ${d.medianMhz} MHz, ${d.startC}→${d.peakC} °C${flags.length ? `, ${flags.join('+')}` : ''}`;
   }).join('; ');
   return r.dies.valid ? each : `**invalid**: ${r.dies.reason}; ${each}`;
 }
@@ -113,7 +113,7 @@ const lines = [
   ...run.errors.map((e) => `| ${e.option} | — | — | error: ${cell(e.error).slice(0, 120)} | — | FAIL | — | — | — | — | — | — |`),
   '',
   ...(rule
-    ? [`Dies: each option started once ${dieNames(rule.dies)} read ${rule.startC} °C or less (waiting up to ${rule.coolTimeoutS} s), and shows each die's median SM clock and peak temperature while it ran. ` +
+    ? [`Dies: each option started once ${dieNames(rule.dies)} read ${rule.startC} °C or less (waiting up to ${rule.coolTimeoutS} s), and shows each die's median SM clock, and its temperature at the start and at the peak, while it ran. ` +
         `A die at ${rule.stopC} °C, or a sw-power-cap, hw-slowdown, sw-thermal, hw-thermal or power-brake flag, makes the option's tok/s invalid. Read with nvidia-smi; nothing was set.`, '']
     : []),
   ...(server ? [server] : []),
