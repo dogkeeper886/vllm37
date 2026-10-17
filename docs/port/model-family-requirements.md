@@ -1439,7 +1439,7 @@ GGUF/ONNX/BF16 repo (GGUF is `ggml-org/gpt-oss-20b-GGUF`, 2025-08-02, not openai
 | MXFP4 MoE — CPU | x86 AMX CPU kernel | CPU platform | n/a | N/A on CUDA | `experts/cpu_moe.py:624-634` | — | — |
 | MXFP4 MoE — EMULATION | `OCP_MXQuantizationEmulationTritonExperts` subclass of `TritonExperts`: per-forward dequant via `quark.torch.kernel.mx.dq_mxfp4`, then Triton `fused_moe_kernel` | amd-quark + Triton | none checked in Python | BLOCKED (GEMM is Triton) | `experts/ocp_mx_emulation_moe.py:84, 123-139, 158-210`; `quantization/utils/mxfp4_utils.py:146-158, 199-206`; `fused_moe.py:298, 864` | none (no pure-torch MXFP4 GEMM wired into any oracle) | NO |
 | BF16/FP16 MoE experts (unquantized) | TritonExperts (`fused_moe_kernel`, `HAS_BIAS`), FlashInfer TRTLLM BF16 (CC 10.x, no swigluoai), FlashInfer CUTLASS (CC 9.0/10/12) | Triton / FlashInfer | Triton: no Python CC check (`triton_moe.py:118-119`) | BLOCKED (would be selected, fails at Triton launch) | `oracle/unquantized.py:68-74`; `experts/triton_moe.py:436, 557`; `fused_moe.py:350, 505-508`; `experts/trtllm_bf16_moe.py:95-102, 118-120` | `CPUUnquantizedExperts` supports SWIGLUOAI+bias (`experts/cpu_moe.py:170-176, 241-309`) but CPU-platform only | NO (not reachable on CUDA) |
-| Router top-k (softmax, renorm) | CUDA `topk_softmax` (`_moe_C`) | `_moe_C` built for sm_37 | not arch-guarded in source | UNVERIFIED (depends on `_moe_C` build; CMake min arch 7.0, `CMakeLists.txt:116-132`) | `router/fused_topk_router.py:26-43` | torch `grouped_topk` softmax branch (`router/grouped_topk_router.py:112-164`) is correct with 1 group, but not selected for gpt-oss | YES if rewired |
+| Router top-k (softmax, renorm) | CUDA `topk_softmax` (`_moe_C`) | `_moe_C` built for sm_37 | not arch-guarded in source | UNVERIFIED (depends on `_moe_C` build; CMake min arch 7.0, `CMakeLists.txt:116-132`) | `router/fused_topk_router.py:26-43` | torch `grouped_topk` softmax branch (`router/grouped_topk_router.py:112-164`) is correct with 1 group, but not selected for gpt-oss | YES if rewired; Fork: built and tested on sm_37 (§9.6). |
 | SwiGLU-OAI activation in MoE | CUDA `_C.swigluoai_and_mul` | `_C` build | not arch-guarded (dispatch on float types, `activation_kernels.cu:1019`) | UNVERIFIED (build) | `fused_moe/activation.py:380-381`; `csrc/libtorch_stable/activation_kernels.cu:409-422` | `SwigluOAIAndMul.forward_native` (`layers/activation.py:486-493`) — not used by the MoE path | YES if MoE path is changed to call it |
 | Attention with sinks + sliding window 128 | TRITON_ATTN `unified_attention` (only sink-capable backend below CC 9.0) | Triton | Triton floor | BLOCKED | `triton_attn.py:395-396, 413-414`; `flash_attn.py:467-468`; `flashinfer.py:525-544`; `backend.py:169-170` | none in runtime (test reference `tests/kernels/attention/test_triton_unified_attention.py:125-171` has sliding window but no sinks) | NO |
 | YaRN RoPE (fp32 cache), RMSNorm, qkv/o bias linears | `_C` rotary/rms_norm; cuBLAS | `_C` | shared runtime | shared runtime | `gpt_oss.py:110-126, 137-153`; `layernorm.py:74, 96` | `forward_native` (RMSNorm `layernorm.py:74`) | YES |
@@ -1466,7 +1466,7 @@ Blockers:
 1. **MXFP4 checkpoint is rejected at config time** (min CC 80, BF16 activations only; `mxfp4.py:67-77`, `config/vllm.py:940-955`), and every MXFP4 MoE backend needs CC ≥ 7.5–10.0 or Triton; the "emulation" backend still runs Triton GEMMs (`ocp_mx_emulation_moe.py:84, 210`). Fix: offline-dequantize MXFP4 → FP16 (or use a community BF16 repo and cast to FP16) — i.e. never run MXFP4 on device.
 2. **No dtype that fits**: CC < 6.0 → FP32 only (`platforms/cuda.py:255-264`); 20.9B params × 4 B ≈ 84 GB ≫ 24 GB (2 × 12 GB K80 dies). Even FP16 (≈ 42 GB) does not fit; only an INT4/INT8 weight-only format with a K80-capable kernel (e.g. the fork's GGUF path, min CC 60 as-is in `vllm37/.../gguf.py:43-44`, would need lowering and gpt-oss arch mapping) or CPU expert offload could fit. Fix: enable FP16 storage on sm_37 (FP16 storage + FP32 math, as the fork presumably does) **and** a ≤ 4-bit expert format with a non-Triton dequant-GEMM kernel.
 3. **Attention sinks + sliding window**: on CC < 9.0 only TRITON_ATTN supports sinks (`triton_attn.py:395-396`; FA `flash_attn.py:467-468`; FlashInfer `flashinfer.py:525-544`); Triton does not target Kepler; the fork's v0 backends have no sinks. Fix: add sinks (extra per-head logit in the softmax denominator) + window 128 to the fork's K80 paged-attention kernel / a torch reference path.
-4. **MoE expert GEMM (any dtype) is Triton/FlashInfer/Marlin only** (`oracle/unquantized.py:68-74`); fix: a torch per-expert loop (index_select + matmul + bias + `SwigluOAIAndMul.forward_native` `activation.py:486-493`) or a CUDA grouped GEMM without tensor cores; router via torch top-k (`grouped_topk_router.py:112-164`) if `_moe_C` is not built for sm_37.
+4. **MoE expert GEMM (any dtype) is Triton/FlashInfer/Marlin only** (`oracle/unquantized.py:68-74`); fix: a torch per-expert loop (index_select + matmul + bias + `SwigluOAIAndMul.forward_native` `activation.py:486-493`) or a CUDA grouped GEMM without tensor cores; router via torch top-k (`grouped_topk_router.py:112-164`) if `_moe_C` is not built for sm_37 (the fork builds it, §9.6).
 Net: gpt-oss-20b is impractical on a K80 (memory, not just kernels); LFM2 dense models (230M–2.6B) are realistic after the ShortConv port.
 
 ## 8. Hunyuan dense, ERNIE 4.5 and SmolLM3 on Tesla K80 (sm_37)
@@ -1609,8 +1609,8 @@ MoE (21B-A3B, -Thinking):
 | torch.compile | Inductor → Triton | Triton | not Kepler | enabled by default (`ernie45.py:32`) | — | `-O0`/`--enforce-eager` | yes |
 | Attention | FA / FI / Triton / Flex | see S3 | 8.0 / Triton | **blocker** | S3 | none on CUDA | no |
 | MoE gate | `F.linear` fp32 | torch | any | OK | `gate_linear.py:287-302` | — | — |
-| MoE top-k (+bias) | `_moe_C.topk_softmax` (cub, `__bfloat162float`/`__half2float` conversions only; fp32 input here) | `_moe_C` | 7.0 build | missing; source looks arch-portable (no `__CUDA_ARCH__` guard found by grep) — compile for sm_37 UNVERIFIED | `topk_softmax_kernels.cu:63-66, 83, 181-186, 285-287, 849` | no CUDA fallback (`GroupedTopKRouter.forward_native` exists at `router/grouped_topk_router.py:192` but ERNIE does not use grouped top-k) | no (needs port or a torch top-k) |
-| MoE align | `_moe_C.moe_align_block_size` | `_moe_C` | 7.0 build | missing | `moe_align_block_size.py:153` | none | no |
+| MoE top-k (+bias) | `_moe_C.topk_softmax` (cub, `__bfloat162float`/`__half2float` conversions only; fp32 input here) | `_moe_C` | 7.0 build | missing; source looks arch-portable (no `__CUDA_ARCH__` guard found by grep) — compile for sm_37 UNVERIFIED | `topk_softmax_kernels.cu:63-66, 83, 181-186, 285-287, 849` | no CUDA fallback (`GroupedTopKRouter.forward_native` exists at `router/grouped_topk_router.py:192` but ERNIE does not use grouped top-k) | no (needs port or a torch top-k); Fork: built and tested on sm_37 (§9.6). |
+| MoE align | `_moe_C.moe_align_block_size` | `_moe_C` | 7.0 build | missing | `moe_align_block_size.py:153` | none | no; Fork: built and tested on sm_37 (§9.6). |
 | MoE experts | Triton `fused_moe_kernel` / FlashInfer | Triton / FI (SM90/100) | Triton | **blocker** | `oracle/unquantized.py:63-73, 134-146`; `fused_moe.py:297` | none on CUDA (CPU C++ only; torch ref in tests only) | no |
 
 #### Quantized format support
@@ -1627,7 +1627,7 @@ MoE (21B-A3B, -Thinking):
 - **ERNIE-4.5-0.3B (dense)**: no model-specific blocker. It is Llama with non-NeoX RoPE; all ops have pure-torch fallbacks (RMSNorm, RoPE, SiLU-mul) or are cuBLAS. Blockers are shared runtime only: attention (S3) and `_C` build (S1). Fork already registers it. fp32 weights 1.44 GB — fits easily.
 - **ERNIE-4.5-21B-A3B (-PT/-Thinking)**: blocked.
   1. Fused MoE experts are Triton/FlashInfer only on CUDA (`oracle/unquantized.py:63-73`) → port work: write a non-Triton expert path for sm_37 (e.g. torch loop over experts with `index_select`+`F.linear`, or a CUDA grouped GEMM in fp32 accumulate); check whether the fork's `FusedMoE` already has one (outside this task's scope).
-  2. `topk_softmax` and `moe_align_block_size` are `_moe_C` CUDA ops (not built for sm_37, S1) → compile them for sm_37 (source has no arch guard in `topk_softmax_kernels.cu`, UNVERIFIED) or replace with `torch.softmax`+`torch.topk` with bias-corrected selection.
+  2. `topk_softmax` and `moe_align_block_size` are `_moe_C` CUDA ops (not built for sm_37, S1) → compile them for sm_37 (source has no arch guard in `topk_softmax_kernels.cu`, UNVERIFIED) or replace with `torch.softmax`+`torch.topk` with bias-corrected selection. The fork builds both for sm_37 (§9.6).
   3. Memory (S8): 21.95 B params = 87.8 GB fp32 / 43.9 GB fp16 vs 24 GB per K80 board; no official int4/GGUF release in HF format → does not fit even with TP=2 unless the port adds an sm_37 int4/int8 weight-only MoE path plus third-party quantization, or CPU offload of experts. Practically: **not viable on one K80**.
   4. Attention (S3) as for dense.
 
@@ -1830,3 +1830,17 @@ End to end on one die (GPU1), offline, greedy, half precision unless noted, agai
 - Q4_0, Q4_1 and Q8_0 as stored; today they are repacked into the int4 and int8 layouts with an FP32 scale and zero per 32 weights. Q5_K is dequantized.
 - int8 at 8B and above: not run (Qwen3-8B int8 is about 8.6 GiB of weights, so one die leaves little room for context).
 - FP8 / FP4 weights decoded by bit operations, as weight-only formats.
+
+### 9.6 MoE on the K80 (#85)
+
+`vllm._moe_C` loads in the legacy build, so `supports_moe_ops` is `True`. What it holds on sm_37 (`tests/kernels/moe/test_k80_moe_ops.py`, and the upstream `test_moe_align_block_size.py`, 1,125 cases):
+
+| Op | On sm_37 | Note |
+|---|---|---|
+| `topk_softmax` | yes | gating in FP32; ids int32 or int64. `fused_topk` gives the reference ids in FP16 and FP32 |
+| `moe_align_block_size` | yes | the Python wrapper no longer calls `triton.cdiv` |
+| `moe_sum` | yes | FP32, FP16 |
+| `moe_permute`, `moe_unpermute`, `shuffle_rows` | not built | need CUTLASS and `cuda_fp8.h`, and CUDA 12; `moe_permute_unpermute_supported()` returns `False` |
+| `moe_wna16_gemm`, Marlin MoE | not built | CUTLASS; Marlin needs sm_80 |
+
+What a MoE model still needs: the experts. `fused_experts` and the quantized MoE methods run Triton kernels, and Triton is not installed and does not support sm_37. A K80 expert path would group the tokens by expert (`moe_align_block_size`) and run each expert's two products with cuBLAS (FP16) or with the K80 int4/int8 kernels of §9.4, then combine the results with the routing weights (`moe_sum`).
