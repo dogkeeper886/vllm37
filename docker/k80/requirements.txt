@@ -2,4 +2,4 @@
 # Used by the runtime image and the host build (tools/k80-host/setup.sh deps);
 # always install with -c docker/k80/constraints.txt.
 -r ../../requirements/common.txt
-ray>=2.9.0    # pipeline parallelism
+ray>=2.9.0    # only for distributed_executor_backend=ray or more dies than one host has; TP and PP on one host use mp (vllm/config/parallel.py)
