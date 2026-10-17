@@ -184,6 +184,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
+            # K80 fork (#119): Kepler runs neither Marlin MoE nor the WNA16
+            # MoE Triton kernel.
+            if on_kepler():
+                return get_moe_quant_method(self, layer, prefix,
+                                            GPTQK80MoEMethod)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
@@ -685,3 +690,42 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices2=layer.w2_g_idx_sort_indices,
             workspace=layer.workspace,
             is_k_full=self.is_k_full)
+
+
+class GPTQK80MoEMethod(GPTQMarlinMoEMethod):
+    """K80 fork (#119): symmetric GPTQ int4 and int8 experts on Kepler,
+    repacked into the K80 layout and run by the K80 int4 kernel
+    (fused_moe/k80_moe.py)."""
+
+    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+        super().__init__(quant_config)
+        if quant_config.desc_act:
+            raise ValueError("K80 MoE experts: GPTQ act-order (desc_act) is "
+                             "not supported")
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        from vllm.model_executor.layers.fused_moe.k80_moe import (
+            k80_check_groups)
+        k80_check_groups(intermediate_size_per_partition,
+                         self.quant_config.group_size)
+        super().create_weights(layer, num_experts, hidden_size,
+                               intermediate_size_per_partition, params_dtype,
+                               **extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.k80_moe import k80_moe_load
+        k80_moe_load(layer, ("w13_qweight", "w13_scales"),
+                     ("w2_qweight", "w2_scales"), self.quant_type.size_bits,
+                     self.quant_type.bias,
+                     ("w13_qzeros", "w2_qzeros", "w13_g_idx", "w2_g_idx",
+                      "w13_g_idx_sort_indices", "w2_g_idx_sort_indices",
+                      "workspace"))
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
+              router_logits: torch.Tensor, top_k: int, renormalize: bool,
+              **kwargs) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.k80_moe import k80_moe_apply
+        return k80_moe_apply(layer, x, router_logits, top_k, renormalize,
+                             **kwargs)

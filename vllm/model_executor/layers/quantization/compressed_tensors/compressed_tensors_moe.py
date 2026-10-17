@@ -72,6 +72,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
+            # K80 fork (#119): Marlin MoE and the WNA16 MoE Triton kernel
+            # need more than Kepler has.
+            from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+                on_kepler)
+            if on_kepler():
+                logger.info_once("Using CompressedTensorsWNA16K80MoEMethod")
+                return CompressedTensorsWNA16K80MoEMethod(quant_config)
             # Prefer to use the MarlinMoE kernel when it is supported.
             if not check_moe_marlin_supports_layer(layer, group_size):
                 if (weight_quant.strategy in QuantizationStrategy.GROUP and
@@ -1489,3 +1496,35 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w1_zp=None,
             w2_zp=None,
             block_shape=[0, self.group_size])
+
+
+class CompressedTensorsWNA16K80MoEMethod(CompressedTensorsWNA16MoEMethod):
+    """K80 fork (#119): int4 and int8 group-quantized experts on Kepler,
+    repacked into the K80 layout and run by the K80 int4 kernel
+    (fused_moe/k80_moe.py)."""
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        from vllm.model_executor.layers.fused_moe.k80_moe import (
+            k80_check_groups)
+        k80_check_groups(intermediate_size_per_partition, self.group_size)
+        super().create_weights(layer, num_experts, hidden_size,
+                               intermediate_size_per_partition, params_dtype,
+                               **extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.k80_moe import k80_moe_load
+        k80_moe_load(layer, ("w13_weight_packed", "w13_weight_scale"),
+                     ("w2_weight_packed", "w2_weight_scale"), self.num_bits,
+                     2**(self.num_bits - 1),
+                     ("w13_weight_shape", "w2_weight_shape",
+                      "w13_weight_g_idx", "w2_weight_g_idx",
+                      "w13_g_idx_sort_indices", "w2_g_idx_sort_indices"))
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
+              router_logits: torch.Tensor, top_k: int, renormalize: bool,
+              **kwargs) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.k80_moe import k80_moe_apply
+        return k80_moe_apply(layer, x, router_logits, top_k, renormalize,
+                             **kwargs)

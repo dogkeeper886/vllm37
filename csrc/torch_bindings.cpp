@@ -620,6 +620,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "k80_int4_dequantize(Tensor! out, Tensor qweight, Tensor scales, "
       "Tensor zeros, int bits=4) -> ()");
   ops.impl("k80_int4_dequantize", torch::kCUDA, &k80_int4_dequantize);
+  // K80 fork (#119): the same product for MoE experts, weights [E, N, K/P].
+  ops.def(
+      "k80_int4_moe_gemm(Tensor x, Tensor qweight, Tensor scales, "
+      "Tensor zeros, Tensor expert_ids, Tensor? slots, Tensor? padded, "
+      "int num_slots, int rows_per_input, int bits=4) -> Tensor");
+  ops.impl("k80_int4_moe_gemm", torch::kCUDA, &k80_int4_moe_gemm);
+  // And for FP32 / FP16 expert weights [E, N, K], one expert per slot.
+  ops.def(
+      "k80_moe_dense_gemm(Tensor x, Tensor w, Tensor expert_ids, "
+      "int rows_per_input) -> Tensor");
+  ops.impl("k80_moe_dense_gemm", torch::kCUDA, &k80_moe_dense_gemm);
 
   // K80 fork (#111): product and dequantize for GGUF Q4_K and Q6_K weights
   // as stored (uint8 [N, row bytes]); type is the GGMLQuantizationType.

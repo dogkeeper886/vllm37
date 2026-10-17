@@ -1843,4 +1843,32 @@ End to end on one die (GPU1), offline, greedy, half precision unless noted, agai
 | `moe_permute`, `moe_unpermute`, `shuffle_rows` | not built | need CUTLASS and `cuda_fp8.h`, and CUDA 12; `moe_permute_unpermute_supported()` returns `False` |
 | `moe_wna16_gemm`, Marlin MoE | not built | CUTLASS; Marlin needs sm_80 |
 
-What a MoE model still needs: the experts. `fused_experts` and the quantized MoE methods run Triton kernels, and Triton is not installed and does not support sm_37. A K80 expert path would group the tokens by expert (`moe_align_block_size`) and run each expert's two products with cuBLAS (FP16) or with the K80 int4/int8 kernels of §9.4, then combine the results with the routing weights (`moe_sum`).
+`fused_experts` and the quantized MoE methods run Triton kernels, and Triton is not installed and does not support sm_37. The fork runs the experts its own way (#119, `vllm/model_executor/layers/fused_moe/k80_moe.py`):
+
+| Experts | Method on Kepler | Product |
+|---|---|---|
+| FP16, FP32 | `UnquantizedFusedMoEMethod` with `k80_fused_experts` | up to 512 (token, expert) slots `k80_moe_dense_gemm`, weights read in place; above, one cuBLAS product per expert |
+| int4, int8, compressed-tensors (symmetric, group) | `CompressedTensorsWNA16K80MoEMethod` | `k80_int4_moe_gemm`: up to 512 slots one block row per slot; above, blocks of 8 slots of one expert (`moe_align_block_size`) |
+| int4, int8, GPTQ (symmetric, no act-order) | `GPTQK80MoEMethod` | as above |
+
+- **Layout:** the int4/int8 experts are repacked at load time into the K80 layout of §9.4, one weight per expert, `[E, N, K / P]`. compressed-tensors and GPTQ pack along K in the same order, so the repack is a transpose.
+- **No host sync:** neither int4/int8 mode syncs with the host, so CUDA graphs can capture them. FP16/FP32 above 512 slots syncs once per layer, and while a graph is captured it stays on `k80_moe_dense_gemm`.
+- **Not supported:** expert parallelism, expert load balancing, expert biases (gpt-oss), activations other than SiLU and GELU, act-order.
+
+Measured 2026-10-17, eager, half, Granite on GPU1. The P2P-on and GPTQ runs used `gpu_memory_utilization` 0.93, the others 0.9 (at 0.9, NCCL's P2P buffers leave less than 2,048 tokens of KV cache). No run had a throttle flag; the hottest die reached 71 °C.
+
+| Model | Dies | Weights per die | Decode tok/s, 1 / 2 / 4 calls | Perplexity | Texts |
+|---|---|---|---|---|---|
+| ibm-granite/granite-3.1-1b-a400m-instruct, FP32 | 1 | | 49.0 / 61.3 / 71.4 | 11.2215 (CPU FP32: 11.2214) | 8 / 8 as CPU FP32 |
+| same, FP16 | 1 | | 65.0 / 105.0 / 123.8 | 11.199 | 6 / 8 as CPU FP32 |
+| RedHatAI/Qwen3-30B-A3B-quantized.w4a16 | GPU0+GPU1, P2P on (`NCCL_P2P_LEVEL=PIX`) | 8.45 GiB | 26.3 / 44.4 / 60.8 | 7.568 | |
+| same | GPU0+GPU1, P2P off | 8.45 GiB | 25.4 / 44.5 / 60.1 | 7.568 | 8 / 8 as P2P on |
+| same | GPU2+GPU3, P2P on | 8.45 GiB | 14.6 / 13.5 / 14.7 | 7.568 | 8 / 8 as GPU0+GPU1 |
+| same | GPU2+GPU3, P2P off | 8.45 GiB | 8.1 / 10.9 / 13.0 | 7.568 | 8 / 8 as GPU0+GPU1 |
+| Qwen/Qwen3-30B-A3B-GPTQ-Int4 | GPU0+GPU1, P2P off | 8.49 GiB | 25.8 / 45.3 / 59.8 | 7.563 | |
+
+- **Four dies:** Qwen3-30B-A3B at TP=4 gives each die 192 of the 768 intermediate features, which split its groups of 128. The loader would give each die a wrong scale, so the K80 methods refuse such a split at load. A run before that check gave perplexity 7.870 and 1 of 8 texts as TP=2.
+- **Board B:** GPU2+GPU3 decode at a quarter to a half of board A's speed. One MoE layer takes the same time on every die (0.26 ms at 1 token, standalone), and one die of board B is also slower for Granite (51 / 62 / 60 tok/s on GPU2 against 64 / 105 / 123 on GPU1), as for dense models in the cross-board study. A launch takes 9.4 µs on board B against 5.3 µs on board A, and a sync 17 µs against 11.5.
+- **Speed:** Qwen3-30B-A3B decodes at about the speed of the dense Qwen3-8B int4 on the same two dies (32.3 / 47.6 / 57.3, #75), with 3.7 times the parameters.
+- **KV cache at `gpu_memory_utilization` 0.9:** about 2.7k tokens. On rank 0, the startup memory test's sampler logits take 1.4 GiB. At 0.93, about 9.1k tokens fit (GPTQ run).
+- **One MoE layer of Qwen3-30B-A3B int4 per die at TP=2:** 0.17 ms at 1 token and 0.52 ms at 4.
