@@ -442,6 +442,58 @@ def k80_int4_dequantize(out: torch.Tensor,
     torch.ops._C.k80_int4_dequantize(out, qweight, scales, zeros, bits)
 
 
+# K80 fork (#119): the product for MoE experts, weights [E, N, K / P]. Pair
+# mode (slots None): slot s uses expert expert_ids[s]. Block mode: slots and
+# expert_ids from moe_align_block_size with block size 8, padded its
+# num_tokens_post_pad. Slot s reads x[s // rows_per_input].
+def k80_int4_moe_gemm(x: torch.Tensor,
+                      qweight: torch.Tensor,
+                      scales: torch.Tensor,
+                      zeros: torch.Tensor,
+                      expert_ids: torch.Tensor,
+                      slots: Optional[torch.Tensor],
+                      padded: Optional[torch.Tensor],
+                      num_slots: int,
+                      rows_per_input: int,
+                      bits: int = 4) -> torch.Tensor:
+    return torch.ops._C.k80_int4_moe_gemm(x, qweight, scales, zeros,
+                                          expert_ids, slots, padded,
+                                          num_slots, rows_per_input, bits)
+
+
+# K80 fork (#119): slot s is x[s // rows_per_input] @ w[expert_ids[s]]^T,
+# FP32 / FP16 expert weights w [E, N, K].
+def k80_moe_dense_gemm(x: torch.Tensor, w: torch.Tensor,
+                       expert_ids: torch.Tensor,
+                       rows_per_input: int) -> torch.Tensor:
+    return torch.ops._C.k80_moe_dense_gemm(x, w, expert_ids, rows_per_input)
+
+
+if hasattr(torch.ops._C, "k80_moe_dense_gemm"):
+
+    @register_fake("_C::k80_moe_dense_gemm")
+    def _k80_moe_dense_gemm_fake(x: torch.Tensor, w: torch.Tensor,
+                                 expert_ids: torch.Tensor,
+                                 rows_per_input: int) -> torch.Tensor:
+        return x.new_empty((expert_ids.numel(), w.size(1)))
+
+
+if hasattr(torch.ops._C, "k80_int4_moe_gemm"):
+
+    @register_fake("_C::k80_int4_moe_gemm")
+    def _k80_int4_moe_gemm_fake(x: torch.Tensor,
+                                qweight: torch.Tensor,
+                                scales: torch.Tensor,
+                                zeros: torch.Tensor,
+                                expert_ids: torch.Tensor,
+                                slots: Optional[torch.Tensor],
+                                padded: Optional[torch.Tensor],
+                                num_slots: int,
+                                rows_per_input: int,
+                                bits: int = 4) -> torch.Tensor:
+        return x.new_empty((num_slots, qweight.size(1)))
+
+
 if hasattr(torch.ops._C, "k80_int4_gemm"):
 
     @register_fake("_C::k80_int4_gemm")

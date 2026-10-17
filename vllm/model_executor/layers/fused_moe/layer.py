@@ -253,6 +253,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.fused_experts = fused_experts  # type: ignore
+        # K80 fork (#119): fused_experts is Triton, which Kepler lacks.
+        from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+            on_kepler)
+        if on_kepler():
+            from vllm.model_executor.layers.fused_moe.k80_moe import (
+                k80_fused_experts)
+            self.fused_experts = k80_fused_experts  # type: ignore
         self.topk_indices_dtype = None
         self.moe = moe
         self.has_bias = self.moe.has_bias
@@ -859,7 +866,8 @@ class FusedMoE(torch.nn.Module):
         if (self.quant_method.__class__.__name__
                 in ("GPTQMarlinMoEMethod",
                     "CompressedTensorsWNA16MarlinMoEMethod",
-                    "CompressedTensorsWNA16MoEMethod")):
+                    "CompressedTensorsWNA16MoEMethod", "GPTQK80MoEMethod",
+                    "CompressedTensorsWNA16K80MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
@@ -1120,7 +1128,8 @@ class FusedMoE(torch.nn.Module):
         # against known CompressionFormat enum values that have this quality
         if self.quant_method.__class__.__name__ in (
                 "CompressedTensorsWNA16MarlinMoEMethod",
-                "CompressedTensorsWNA16MoEMethod"):
+                "CompressedTensorsWNA16MoEMethod",
+                "CompressedTensorsWNA16K80MoEMethod"):
             loaded_weight = loaded_weight.t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):

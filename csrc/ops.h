@@ -324,6 +324,20 @@ void k80_int4_dequantize(torch::Tensor& out, torch::Tensor const& qweight,
                          torch::Tensor const& scales,
                          torch::Tensor const& zeros, int64_t bits);
 
+// K80 fork (#119): the int4 and int8 product for MoE experts.
+torch::Tensor k80_int4_moe_gemm(torch::Tensor const& x,
+                                torch::Tensor const& qweight,
+                                torch::Tensor const& scales,
+                                torch::Tensor const& zeros,
+                                torch::Tensor const& expert_ids,
+                                std::optional<torch::Tensor> const& slots,
+                                std::optional<torch::Tensor> const& padded,
+                                int64_t num_slots, int64_t rows_per_input,
+                                int64_t bits);
+torch::Tensor k80_moe_dense_gemm(torch::Tensor const& x, torch::Tensor const& w,
+                                 torch::Tensor const& expert_ids,
+                                 int64_t rows_per_input);
+
 // K80 fork (#111): GGUF Q4_K and Q6_K weights as stored, for Kepler.
 torch::Tensor k80_gguf_gemm(torch::Tensor const& x, torch::Tensor const& qweight,
                             int64_t type);
