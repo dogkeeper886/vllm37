@@ -209,6 +209,7 @@ class LLMEngine:
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.vllm_config = vllm_config
+        self._k80_guided = None  # K80 fork (#86): guided decoding on V0
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -2018,6 +2019,18 @@ class LLMEngine:
             processors = get_bad_words_logits_processors(
                 bad_words=sampling_params.bad_words, tokenizer=tokenizer)
             logits_processors.extend(processors)
+
+        # K80 fork (#86): V0 lost guided decoding upstream; serve it with
+        # V1's xgrammar backend as a logits processor.
+        if sampling_params.guided_decoding is not None:
+            if self._k80_guided is None:
+                from vllm.engine.k80_guided_decoding import K80GuidedDecoding
+                self._k80_guided = K80GuidedDecoding(
+                    self.vllm_config, self.model_config.get_vocab_size())
+            logits_processors.append(
+                self._k80_guided.logits_processor(
+                    sampling_params, self.get_tokenizer(lora_request)))
+            sampling_params.guided_decoding = None
 
         if logits_processors:
             if sampling_params.logits_processors is None:
