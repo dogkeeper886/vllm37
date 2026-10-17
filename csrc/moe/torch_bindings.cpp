@@ -1,6 +1,12 @@
 #include "core/registration.h"
 #include "moe_ops.h"
 
+#ifdef VLLM_BUILD_LEGACY_CUDA
+// The legacy build leaves out moe_permute_unpermute_op.cu: it needs CUTLASS
+// and cuda_fp8.h, and its kernels need CUDA 12.
+bool moe_permute_unpermute_supported() { return false; }
+#endif
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
@@ -56,7 +62,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       " -> Tensor");
 #endif // !USE_ROCM && !VLLM_BUILD_LEGACY_CUDA
 
-#ifndef USE_ROCM
+#if !defined(USE_ROCM) && !defined(VLLM_BUILD_LEGACY_CUDA)
   m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
@@ -79,6 +85,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "output_tensor) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
+#elif defined(VLLM_BUILD_LEGACY_CUDA)
+  m.def("moe_permute_unpermute_supported() -> bool");
+  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 #endif
 }
 

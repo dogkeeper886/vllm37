@@ -5,8 +5,7 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.triton_utils import triton
-from vllm.utils import round_up
+from vllm.utils import cdiv, round_up
 
 
 def moe_align_block_size(
@@ -71,7 +70,7 @@ def moe_align_block_size(
     sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    max_num_m_blocks = cdiv(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
