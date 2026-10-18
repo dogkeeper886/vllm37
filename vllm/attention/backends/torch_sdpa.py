@@ -23,6 +23,11 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+# K80 fork (#96): attention scores (heads x query rows x keys) per SDPA call
+# in prefill, 256 MiB in FP32; longer prompts go in chunks of query rows.
+K80_SDPA_MAX_SCORES = 1 << 26
+
+
 class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
@@ -471,49 +476,23 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
             k = k.unsqueeze(0).transpose(1, 2)  # [1, num_heads, kv_len, head]
             v = v.unsqueeze(0).transpose(1, 2)  # [1, num_heads, kv_len, head]
 
-            # Build attention mask for ALiBi if needed
-            attn_mask = None
-            if self.alibi_slopes is not None:
-                # Build ALiBi bias: [num_heads, q_len, kv_len]
-                alibi_slopes = self.alibi_slopes.to(query.device,
-                                                    dtype=query.dtype)
-                # positions: relative distance
-                positions = torch.arange(kv_len, device=query.device,
-                                         dtype=query.dtype)
-                q_positions = torch.arange(q_len, device=query.device,
-                                           dtype=query.dtype)
-                # bias[h, i, j] = slopes[h] * (j - i) for causal
-                # For simplicity, use slopes * j (absolute position bias)
-                bias = alibi_slopes[:, None, None] * (
-                    positions[None, None, :] - q_positions[None, :, None])
-                if is_causal:
-                    # Apply causal mask manually since we're providing attn_mask
-                    causal_mask = torch.triu(
-                        torch.full((q_len, kv_len), float("-inf"),
-                                   device=query.device, dtype=query.dtype),
-                        diagonal=1)
-                    bias = bias + causal_mask[None, :, :]
-                attn_mask = bias.unsqueeze(0)  # [1, num_heads, q_len, kv_len]
-                is_causal = False  # Causal already in mask
-
-            if self._sdpa_has_scale:
-                out = F.scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=attn_mask,
-                    scale=self.scale,
-                    is_causal=is_causal,
-                )
+            # K80 fork (#96): the math SDPA path that Kepler takes holds the
+            # [num_heads, q_len, kv_len] scores at once, so a long prompt
+            # ran out of memory and took the engine down (3.18 GiB in FP32
+            # for about 7,300 tokens of Qwen3-0.6B). Query rows go in chunks
+            # whose scores stay within K80_SDPA_MAX_SCORES.
+            rows = max(1, K80_SDPA_MAX_SCORES // (q.shape[1] * kv_len))
+            if q_len <= rows:
+                out = self._sdpa(q, k, v, 0, is_causal)
             else:
-                # PyTorch < 2.1: scale not supported, pre-scale query
-                import math
-                default_scale = 1.0 / math.sqrt(q.size(-1))
-                if self.scale != default_scale:
-                    q = q * (self.scale / default_scale)
-                out = F.scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=attn_mask,
-                    is_causal=is_causal,
-                )
+                out = torch.empty_like(q)
+                for a in range(0, q_len, rows):
+                    b = min(a + rows, q_len)
+                    # A causal row attends to the keys up to its own position.
+                    kv_end = kv_len - q_len + b if is_causal else kv_len
+                    out[:, :, a:b] = self._sdpa(q[:, :, a:b], k[:, :, :kv_end],
+                                                v[:, :, :kv_end],
+                                                kv_len - q_len + a, is_causal)
             # out: [1, num_heads, q_len, head_size] -> [q_len, num_heads, head]
             out = out.squeeze(0).transpose(0, 1)
             output[q_start:q_end] = out
@@ -522,3 +501,47 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
             kv_start = kv_end
 
         return output
+
+    def _sdpa(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+              q_pos: int, is_causal: bool) -> torch.Tensor:
+        """F.scaled_dot_product_attention for queries [1, H, q_len, D] at
+        key positions q_pos .. q_pos + q_len - 1 over keys [1, H, kv_len, D]
+        from position 0, with ALiBi and the causal mask."""
+        q_len, kv_len = q.shape[2], k.shape[2]
+        attn_mask = None
+        if self.alibi_slopes is not None or (is_causal and
+                                              (q_pos or q_len != kv_len)):
+            key_pos = torch.arange(kv_len, device=q.device)
+            query_pos = torch.arange(q_pos, q_pos + q_len, device=q.device)
+            if self.alibi_slopes is not None:
+                slopes = self.alibi_slopes.to(q.device, dtype=q.dtype)
+                attn_mask = slopes[:, None, None] * (
+                    key_pos[None, None, :] -
+                    query_pos[None, :, None]).to(q.dtype)
+                if is_causal:
+                    attn_mask = attn_mask.masked_fill(
+                        key_pos[None, None, :] > query_pos[None, :, None],
+                        float("-inf"))
+                attn_mask = attn_mask.unsqueeze(0)  # [1, H, q_len, kv_len]
+            else:
+                attn_mask = key_pos[None, :] <= query_pos[:, None]
+            is_causal = False  # the mask holds it
+        if self._sdpa_has_scale:
+            out = F.scaled_dot_product_attention(q,
+                                                 k,
+                                                 v,
+                                                 attn_mask=attn_mask,
+                                                 scale=self.scale,
+                                                 is_causal=is_causal)
+        else:
+            # PyTorch < 2.1: scale not supported, pre-scale query
+            import math
+            default_scale = 1.0 / math.sqrt(q.size(-1))
+            if self.scale != default_scale:
+                q = q * (self.scale / default_scale)
+            out = F.scaled_dot_product_attention(q,
+                                                 k,
+                                                 v,
+                                                 attn_mask=attn_mask,
+                                                 is_causal=is_causal)
+        return out
