@@ -71,6 +71,33 @@ def k80_gguf_ops():
     return ops if use else None
 
 
+def k80_gguf_check_blocks(row_bytes: int, qtype: int, k: Optional[int],
+                          what: str) -> None:
+    """K80 fork (#132): tensor parallelism splits a row-parallel layer's
+    stored bytes along K, k features in all (None: from row_bytes), so each
+    die's share must hold whole GGUF blocks; a share that cuts one gives the
+    die bytes of a block without its scales, and wrong weights. Refused at
+    load time, naming a die count that keeps the blocks whole."""
+    block, size = gguf.GGML_QUANT_SIZES[WeightType(qtype)]
+    if row_bytes % size == 0:
+        return
+    from vllm.distributed import get_tensor_model_parallel_world_size
+    try:
+        tp = get_tensor_model_parallel_world_size()
+    except AssertionError:  # no parallel group: a layer built on its own
+        tp = 1
+    if k is None:
+        k = round(row_bytes * tp / size) * block
+    blocks = k // block
+    fits = max(d for d in range(1, tp + 1) if tp % d == 0 and blocks % d == 0)
+    raise ValueError(
+        f"K80 GGUF: {what} has {k} input features, {blocks} "
+        f"{WeightType(qtype).name} blocks of {block}; split across "
+        f"{tp} dies, a die's {k / tp:g} features cut a block (#132). Use "
+        f"tensor_parallel_size {fits}, or a GGUF file whose types have blocks "
+        "of 32 (Q4_0, Q4_1, Q8_0).")
+
+
 def _gguf_k(raw: torch.Tensor, qtype: int) -> int:
     block, size = gguf.GGML_QUANT_SIZES[WeightType(qtype)]
     return raw.shape[1] // size * block
@@ -269,6 +296,10 @@ class K80GGUFLinearMethod(GGUFLinearMethod):
         self._gguf_ops = k80_gguf_ops()
         parts = []
         for raw, qtype in _shards(layer):
+            k80_gguf_check_blocks(
+                raw.shape[1], qtype,
+                getattr(layer, "input_size", _gguf_k(raw, qtype)),
+                getattr(layer, "prefix", "") or type(layer).__name__)
             raw = raw.to(device)
             if self._gguf_ops is not None and qtype in K80_GGUF_NATIVE_TYPES:
                 kind, tensors = ("gguf", qtype), (raw.contiguous(), )
@@ -383,12 +414,10 @@ class K80GGUFMoEMethod(GGUFMoEMethod):
         for name in ("w13", "w2"):
             raw = getattr(layer, f"{name}_qweight").data.to(device)
             qtype = getattr(layer, f"{name}_qweight_type").weight_type
-            block, size = gguf.GGML_QUANT_SIZES[WeightType(qtype)]
-            if raw.shape[-1] % size:  # a die's share cut a block
-                raise ValueError(
-                    f"K80 GGUF MoE: {name} rows of {raw.shape[-1]} bytes are "
-                    f"not whole {WeightType(qtype).name} blocks of {block} "
-                    "weights; use fewer dies (tensor_parallel_size), #132")
+            # w2 is split along K across dies; w13's K is the hidden size.
+            k80_gguf_check_blocks(raw.shape[-1], qtype, None,
+                                  f"{getattr(layer, 'layer_name', 'MoE')}."
+                                  f"{name}")
             stacks[name] = (raw, qtype)
             delattr(layer, f"{name}_qweight")
         self.dense = any(
