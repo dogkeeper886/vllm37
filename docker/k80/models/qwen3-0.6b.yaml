@@ -1,0 +1,7 @@
+# The function-test baseline: a small, widely supported model on one die in
+# float32, so a failed function test points at the change, not the model.
+# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+model: Qwen/Qwen3-0.6B
+dtype: float32
+tensor-parallel-size: 1
+max-model-len: 12288

@@ -1,5 +1,6 @@
 /**
- * The summary of a test-all.yml run: one table over the reports of every test job.
+ * The summary of a test-all.yml or test-use-case.yml run: one table over the
+ * reports of every test job.
  *
  *   npx tsx summary.ts [--input reports]
  *

@@ -15,6 +15,9 @@ inputs:
   test:
     description: "Name shown in the report"
     required: true
+  profile:
+    description: "Model profile, a name in docker/k80/models/. Empty = qwen3-0.6b, the baseline, with model, dtype, dies and max_model_len below as overrides; a named profile serves as written and leaves those four out"
+    default: ""
   server:
     description: "Build to serve: docker = the image on the runner, local = the host build (empty = docker)"
     default: ""
@@ -49,7 +52,7 @@ runs:
     - shell: bash
       env:
         TEST: ${{ inputs.test }}
-        REPORT: ${{ inputs.test }}-${{ inputs.dtype }}-${{ inputs.dies }}die-report
+        REPORT: ${{ inputs.profile && format('{0}-report', inputs.test) || format('{0}-{1}-{2}die-report', inputs.test, inputs.dtype, inputs.dies) }}
       run: |
         echo "TEST_NAME=$TEST" >> "$GITHUB_ENV"
         echo "TEST_REPORT=$REPORT" >> "$GITHUB_ENV"
@@ -74,10 +77,11 @@ runs:
       shell: bash
       env:
         SERVER: ${{ inputs.server }}
-        MODEL: ${{ inputs.model }}
-        DTYPE: ${{ inputs.dtype }}
-        TP_SIZE: ${{ inputs.dies }}
-        MAX_MODEL_LEN: ${{ inputs.max_model_len }}
+        PROFILE: ${{ inputs.profile }}
+        MODEL: ${{ !inputs.profile && inputs.model || '' }}
+        DTYPE: ${{ !inputs.profile && inputs.dtype || '' }}
+        TP_SIZE: ${{ !inputs.profile && inputs.dies || '' }}
+        MAX_MODEL_LEN: ${{ !inputs.profile && inputs.max_model_len || '' }}
       run: docker/k80/ci/service-start.sh "$SERVER"
     - name: Test
       if: ${{ success() && !cancelled() }}
@@ -91,7 +95,8 @@ runs:
         DIES: ${{ inputs.dies }}
       # Each option waits for its dies to cool and records their clocks and
       # temperatures (lib/dies.ts); empty temperatures take test.ts's defaults.
+      # VLLM37_DIES, from service-start.sh, counts every die the server took.
       run: >-
         npx tsx test.ts --test "$TEST" --prompt "$PROMPT" --calls "$CALLS" --stagger "$STAGGER"
-        --dies "$DIES" --start-temp "${TEST_START_TEMP:-}" --stop-temp "${TEST_STOP_TEMP:-}"
+        --dies "${VLLM37_DIES:-$DIES}" --start-temp "${TEST_START_TEMP:-}" --stop-temp "${TEST_STOP_TEMP:-}"
         --output results/replies.json
