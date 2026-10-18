@@ -64,7 +64,7 @@ const label = (o: (typeof options)[number]): string =>
   ].filter(Boolean).join(', ') || o.prompt;
 
 const about = `Inputs: prompt=${prompts.join(',')}; calls=${calls.join(',')}; stagger=${stagger.join(',')}. ` +
-  `Each option starts with ${dieNames(dies.rule.dies)} at or below ${startC} °C; a die at ${stopC} °C or a fault flag makes it invalid.`;
+  `Each option starts with ${dieNames(dies.rule.dies)} at or below ${startC} °C; a die at ${stopC} °C or a fault flag marks its tok/s ⚠, not comparable.`;
 
 /** One option's calls, sent once the dies are cool, with what the dies did meanwhile. */
 async function timed(option: string, name: string, opts?: GenerateOptions): Promise<Result[]> {
