@@ -11,16 +11,24 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    # The host user (#87), so files written to the shared Hugging Face cache
+    # stay the user's and the host build (tools/k80-host) can use them.
+    # container-up.sh sets HOST_UID and HOST_GID.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     ports:
       - "8000:8000"
     volumes:
-      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${HF_HOME:-~/.cache/huggingface}:/cache/huggingface
       # Host-visible log directory for vllm + NCCL logs. Default to /tmp so
       # nothing lands in the repo tree by accident. Override with VLLM_LOG_DIR.
       - ${VLLM_LOG_DIR:-/tmp/vllm-logs}:/var/log/vllm
     environment:
       # Engine settings live in runtime/Dockerfile.local; only per-run
-      # diagnostics are set here.
+      # diagnostics and paths are set here.
+      - HF_HOME=/cache/huggingface
+      # The host user has no home in the image; vLLM's and PyTorch's caches
+      # go under /tmp.
+      - HOME=/tmp
       - NCCL_DEBUG=INFO
       # NCCL writes to this file per host and per PID (%h / %p are NCCL
       # substitutions). Keeps NCCL output separate from vLLM's stdout so a
