@@ -392,10 +392,19 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0 "
                                       "XFORMERS backend.")
+        # K80 fork (#129): attention sinks (gpt-oss), one logit per head with
+        # no value. The model loads them after this, into the same tensor.
+        if sinks is not None and sinks.shape != (num_heads, ):
+            raise ValueError(f"Attention sinks have shape {sinks.shape}, "
+                             f"not ({num_heads}, )")
+        if sinks is not None and alibi_slopes is not None:
+            raise NotImplementedError("XFormers: attention sinks with ALiBi")
+        self.sinks = sinks
         if logits_soft_cap is not None:
             logger.warning_once("XFormers does not support logits soft cap. "
                                 "Outputs may be slightly off.")
@@ -629,6 +638,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 layer._k_scale,
                 layer._v_scale,
+                sinks=_float_sinks(self.sinks),
+                sliding_window=self.sliding_window,
             )
 
         # Reshape the output tensor.
@@ -727,9 +738,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 else:
                     raise ValueError("Unknown AttentionType: %s", attn_type)
 
-                if self.sliding_window is not None:
-                    attn_bias = attn_bias.make_local_attention(
-                        self.sliding_window)
+                # K80 fork (#129): the bias is cached without the sliding
+                # window, which each layer adds below, so the layers of an
+                # interleaved model (gpt-oss, Gemma) keep their own windows.
                 attn_bias = [attn_bias]
             else:
                 assert attn_type == AttentionType.DECODER
@@ -748,13 +759,41 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
-            out = xops.memory_efficient_attention_forward(
-                query,
-                key,
-                value,
-                attn_bias=attn_bias[0],
-                p=0.0,
-                scale=self.scale)
+            bias = attn_bias[0]
+            if self.sliding_window is not None:
+                bias = bias.make_local_attention(self.sliding_window)
+            if self.sinks is None:
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=bias,
+                    p=0.0,
+                    scale=self.scale)
+            else:
+                # K80 fork (#129): a sink scales each query's output by
+                # sum / (sum + exp(sink)) = sigmoid(lse - sink).
+                out, lse = xops.memory_efficient_attention_forward_requires_grad(
+                    query,
+                    key,
+                    value,
+                    attn_bias=bias,
+                    p=0.0,
+                    scale=self.scale)
+                # lse is per sequence of the block-diagonal bias, [seqs,
+                # (kv heads,) heads, longest rounded up]; token t of sequence
+                # s is lse[s, ..., t - its start].
+                seq_lens = torch.tensor(attn_metadata.seq_lens,
+                                        device=lse.device)
+                seq = torch.repeat_interleave(
+                    torch.arange(len(attn_metadata.seq_lens),
+                                 device=lse.device), seq_lens)
+                starts = torch.cumsum(seq_lens, 0) - seq_lens
+                pos = torch.arange(seq.numel(), device=lse.device) - starts[seq]
+                lse = lse.movedim(-1, 1)[seq, pos].unsqueeze(0)
+                sinks = _float_sinks(self.sinks).view(lse.shape[2:])
+                out = out * torch.sigmoid(lse - sinks).unsqueeze(-1).to(
+                    out.dtype)
             return out.view_as(original_query).to(original_query.dtype)
 
         # Attention with alibi slopes.
@@ -777,6 +816,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             output[start:end].copy_(out.view_as(original_query[start:end]))
             start += seq_len
         return output
+
+
+def _float_sinks(sinks: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """K80 fork (#129): attention sinks as the float32 the kernels take."""
+    if sinks is None or sinks.dtype == torch.float32:
+        return sinks
+    return sinks.float()
 
 
 def _make_alibi_bias(

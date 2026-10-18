@@ -236,10 +236,19 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0 "
                                       "TORCH_SDPA backend.")
+        # K80 fork (#129): attention sinks (gpt-oss), one logit per head with
+        # no value. The model loads them after this, into the same tensor.
+        if sinks is not None and sinks.shape != (num_heads, ):
+            raise ValueError(f"Attention sinks have shape {sinks.shape}, "
+                             f"not ({num_heads}, )")
+        if sinks is not None and alibi_slopes is not None:
+            raise NotImplementedError("TorchSDPA: attention sinks with ALiBi")
+        self.sinks = sinks
         if logits_soft_cap is not None:
             logger.warning_once(
                 "TorchSDPA does not support logits soft cap. "
@@ -408,6 +417,8 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
                 self.alibi_slopes,
                 layer._k_scale,
                 layer._v_scale,
+                sinks=None if self.sinks is None else self.sinks.float(),
+                sliding_window=self.sliding_window,
             )
 
         return output.view(-1, self.num_heads * self.head_size)
@@ -482,17 +493,24 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
             # for about 7,300 tokens of Qwen3-0.6B). Query rows go in chunks
             # whose scores stay within K80_SDPA_MAX_SCORES.
             rows = max(1, K80_SDPA_MAX_SCORES // (q.shape[1] * kv_len))
+            window = self.sliding_window if is_causal else None
             if q_len <= rows:
-                out = self._sdpa(q, k, v, 0, is_causal)
+                out = self._sdpa(q, k, v, kv_len - q_len, is_causal, 0,
+                                 window)
             else:
                 out = torch.empty_like(q)
                 for a in range(0, q_len, rows):
                     b = min(a + rows, q_len)
-                    # A causal row attends to the keys up to its own position.
+                    # A causal row attends to the keys up to its own position,
+                    # and with a sliding window (#129) to the last window.
                     kv_end = kv_len - q_len + b if is_causal else kv_len
-                    out[:, :, a:b] = self._sdpa(q[:, :, a:b], k[:, :, :kv_end],
-                                                v[:, :, :kv_end],
-                                                kv_len - q_len + a, is_causal)
+                    kv_lo = (max(0, kv_len - q_len + a - window + 1)
+                             if window is not None else 0)
+                    out[:, :, a:b] = self._sdpa(q[:, :, a:b],
+                                                k[:, :, kv_lo:kv_end],
+                                                v[:, :, kv_lo:kv_end],
+                                                kv_len - q_len + a, is_causal,
+                                                kv_lo, window)
             # out: [1, num_heads, q_len, head_size] -> [q_len, num_heads, head]
             out = out.squeeze(0).transpose(0, 1)
             output[q_start:q_end] = out
@@ -502,15 +520,31 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
 
         return output
 
-    def _sdpa(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-              q_pos: int, is_causal: bool) -> torch.Tensor:
+    def _sdpa(self,
+              q: torch.Tensor,
+              k: torch.Tensor,
+              v: torch.Tensor,
+              q_pos: int,
+              is_causal: bool,
+              k_pos: int = 0,
+              window: Optional[int] = None) -> torch.Tensor:
         """F.scaled_dot_product_attention for queries [1, H, q_len, D] at
         key positions q_pos .. q_pos + q_len - 1 over keys [1, H, kv_len, D]
-        from position 0, with ALiBi and the causal mask."""
+        from position k_pos, with ALiBi, the causal mask, the sliding window
+        and attention sinks (#129)."""
         q_len, kv_len = q.shape[2], k.shape[2]
+        if self.sinks is not None:
+            return self._attend_with_sinks(q, k, v, q_pos, is_causal, k_pos,
+                                           window)
         attn_mask = None
-        if self.alibi_slopes is not None or (is_causal and
-                                              (q_pos or q_len != kv_len)):
+        if window is not None:
+            key_pos = torch.arange(k_pos, k_pos + kv_len, device=q.device)
+            query_pos = torch.arange(q_pos, q_pos + q_len, device=q.device)
+            attn_mask = ((key_pos[None, :] <= query_pos[:, None]) &
+                         (key_pos[None, :] > query_pos[:, None] - window))
+            is_causal = False  # the mask holds it
+        elif self.alibi_slopes is not None or (is_causal and
+                                                (q_pos or q_len != kv_len)):
             key_pos = torch.arange(kv_len, device=q.device)
             query_pos = torch.arange(q_pos, q_pos + q_len, device=q.device)
             if self.alibi_slopes is not None:
@@ -545,3 +579,24 @@ class TorchSDPAImpl(AttentionImpl[TorchSDPAMetadata]):
                                                  attn_mask=attn_mask,
                                                  is_causal=is_causal)
         return out
+
+    def _attend_with_sinks(self, q: torch.Tensor, k: torch.Tensor,
+                           v: torch.Tensor, q_pos: int, is_causal: bool,
+                           k_pos: int, window: Optional[int]) -> torch.Tensor:
+        """K80 fork (#129): attention with a sink per head, one more logit
+        with no value in each softmax, computed in the query dtype as the
+        math SDPA path does: the scores of this call are held once."""
+        q_len, kv_len = q.shape[2], k.shape[2]
+        scores = torch.matmul(q, k.transpose(-1, -2)).mul_(self.scale)
+        if is_causal:
+            key_pos = torch.arange(k_pos, k_pos + kv_len, device=q.device)
+            query_pos = torch.arange(q_pos, q_pos + q_len, device=q.device)
+            masked = key_pos[None, :] > query_pos[:, None]
+            if window is not None:
+                masked |= key_pos[None, :] <= query_pos[:, None] - window
+            scores.masked_fill_(masked, float("-inf"))
+        sinks = self.sinks.to(scores.dtype).view(1, -1, 1, 1)
+        top = torch.maximum(scores.amax(-1, keepdim=True), sinks)
+        probs = scores.sub_(top).exp_()
+        total = probs.sum(-1, keepdim=True) + torch.exp(sinks - top)
+        return torch.matmul(probs, v).div_(total)

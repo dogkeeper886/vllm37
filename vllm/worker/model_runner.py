@@ -1004,7 +1004,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = model_config.get_sliding_window()
+        # K80 fork (#129): only a model whose every layer slides shortens
+        # its decode context here; in an interleaved one (gpt-oss, Gemma) the
+        # attention backends apply each layer's window, as CacheConfig's
+        # sliding_window is left unset for them (EngineArgs).
+        from vllm.transformers_utils.config import is_interleaved
+        self.sliding_window = (None if is_interleaved(
+            model_config.hf_text_config) else model_config.get_sliding_window())
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
         self.max_batchsize_to_capture = \

@@ -70,8 +70,11 @@ class OAIAttention(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
 
+        # K80 fork (#129): the V0 backends' sinks are float32 on Kepler.
+        from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+            on_kepler)
         attention_sink_dtype = (torch.float32 if envs.VLLM_USE_TRTLLM_ATTENTION
-                                else torch.bfloat16)
+                                or on_kepler() else torch.bfloat16)
         self.sinks = torch.nn.Parameter(
             torch.empty(config.num_attention_heads // tp_size,
                         dtype=attention_sink_dtype,
@@ -180,11 +183,16 @@ class TransformerBlock(torch.nn.Module):
         self,
         config: GptOssConfig,
         quant_config: QuantizationConfig,
+        cache_config: Optional[CacheConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
-        self.attn = OAIAttention(config, prefix=f"{prefix}.attn")
+        # K80 fork (#129): the cache config, so the KV cache dtype and block
+        # size reach the attention layers.
+        self.attn = OAIAttention(config,
+                                 cache_config=cache_config,
+                                 prefix=f"{prefix}.attn")
         self.mlp = MLPBlock(config,
                             self.layer_idx,
                             quant_config=quant_config,
@@ -218,6 +226,7 @@ class GptOssModel(nn.Module):
             TransformerBlock(
                 self.config,
                 quant_config=self.quant_config,
+                cache_config=vllm_config.cache_config,
                 prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
             ) for layer_idx in range(self.config.num_hidden_layers)
         ])

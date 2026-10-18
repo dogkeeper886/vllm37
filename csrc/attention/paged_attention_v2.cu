@@ -33,12 +33,13 @@
           seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,    \
           kv_block_stride, kv_head_stride, k_scale_ptr, v_scale_ptr, tp_rank,  \
           blocksparse_local_blocks, blocksparse_vert_stride,                   \
-          blocksparse_block_size, blocksparse_head_sliding_step);              \
+          blocksparse_block_size, blocksparse_head_sliding_step, sinks_ptr,    \
+          sliding_window);                                                     \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
                                          PARTITION_SIZE>                       \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
-          max_num_partitions);
+          max_num_partitions, sinks_ptr, sliding_window, BLOCK_SIZE);
 
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
@@ -51,7 +52,8 @@ void paged_attention_v2_launcher(
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
+    const std::optional<torch::Tensor>& sinks, const int sliding_window) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -65,6 +67,17 @@ void paged_attention_v2_launcher(
       alibi_slopes
           ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
           : nullptr;
+
+  // K80 fork (#129): attention sinks, float32 [num_heads], are optional.
+  if (sinks) {
+    TORCH_CHECK(sinks->scalar_type() == at::kFloat && sinks->is_contiguous() &&
+                    sinks->numel() == query.size(1),
+                "paged_attention: sinks must be contiguous float32 "
+                "[num_heads]");
+  }
+  const float* sinks_ptr =
+      sinks ? reinterpret_cast<const float*>(sinks.value().data_ptr())
+            : nullptr;
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
@@ -137,7 +150,7 @@ void paged_attention_v2_launcher(
       num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
       k_scale, v_scale, tp_rank, blocksparse_local_blocks,                    \
       blocksparse_vert_stride, blocksparse_block_size,                        \
-      blocksparse_head_sliding_step);
+      blocksparse_head_sliding_step, sinks, sliding_window);
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
   if (is_block_sparse) {                                                   \
@@ -185,7 +198,8 @@ void paged_attention_v2(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_head_sliding_step,
+    const std::optional<torch::Tensor>& sinks, const int64_t sliding_window) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_V2_LAUNCHER_BLOCK_SIZE)

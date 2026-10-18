@@ -102,24 +102,35 @@ __device__ void paged_attention_kernel(
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
+    const float* __restrict__ sinks,  // [num_heads] or null
+    const int sliding_window) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
   constexpr bool USE_PARTITIONING = PARTITION_SIZE > 0;
   const int seq_len = seq_lens[seq_idx];
-  if (USE_PARTITIONING && partition_idx * PARTITION_SIZE >= seq_len) {
+  // K80 fork (#129): with a sliding window (0: none) the query attends to
+  // keys first_key .. seq_len - 1. The blocks before first_key's are skipped
+  // (partitions start at its block) and its keys before first_key masked.
+  const int first_key =
+      sliding_window > 0 ? MAX(seq_len - sliding_window, 0) : 0;
+  const int first_block = first_key / BLOCK_SIZE;
+  if (USE_PARTITIONING &&
+      first_block * BLOCK_SIZE + partition_idx * PARTITION_SIZE >= seq_len) {
     // No work to do. Terminate the thread block.
     return;
   }
 
   const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int num_blocks_per_partition =
-      USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_seq_blocks;
+  const int num_blocks_per_partition = USE_PARTITIONING
+                                           ? PARTITION_SIZE / BLOCK_SIZE
+                                           : num_seq_blocks - first_block;
 
   // [start_block_idx, end_block_idx) is the range of blocks to process.
   const int start_block_idx =
-      USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
+      first_block +
+      (USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0);
   const int end_block_idx =
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
@@ -295,9 +306,12 @@ __device__ void paged_attention_kernel(
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
         const bool mask = token_idx >= seq_len;
-        logits[token_idx - start_token_idx] = mask ? 0.f : qk;
+        // K80 fork (#129): a key before the window takes no weight.
+        const bool outside = token_idx < first_key;
+        logits[token_idx - start_token_idx] =
+            mask ? 0.f : (outside ? -FLT_MAX : qk);
         // Update the max value.
-        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+        qk_max = (mask || outside) ? qk_max : fmaxf(qk_max, qk);
       }
     }
   }
@@ -323,6 +337,12 @@ __device__ void paged_attention_kernel(
   }
   // Broadcast the max qk value to all threads.
   qk_max = VLLM_SHFL_SYNC(qk_max, 0);
+  // K80 fork (#129): an attention sink is one more logit with no value: it
+  // only adds exp(sink) to the softmax's sum. Partitions leave it to the
+  // reduce kernel.
+  const bool use_sink = !USE_PARTITIONING && sinks != nullptr;
+  const float sink = use_sink ? sinks[head_idx] : 0.f;
+  if (use_sink) qk_max = fmaxf(qk_max, sink);
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -332,6 +352,7 @@ __device__ void paged_attention_kernel(
     exp_sum += val;
   }
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
+  if (use_sink) exp_sum += __expf(sink - qk_max);
 
   // Compute softmax.
   const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
@@ -510,7 +531,8 @@ __global__ void paged_attention_v1_kernel(
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
+    const float* __restrict__ sinks, const int sliding_window) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
                          KV_DTYPE, IS_BLOCK_SPARSE>(
       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
@@ -518,7 +540,7 @@ __global__ void paged_attention_v1_kernel(
       max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
       kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks,
       blocksparse_vert_stride, blocksparse_block_size,
-      blocksparse_head_sliding_step);
+      blocksparse_head_sliding_step, sinks, sliding_window);
 }
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
@@ -546,14 +568,15 @@ __global__ void paged_attention_v2_kernel(
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
+    const float* __restrict__ sinks, const int sliding_window) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
                          KV_DTYPE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
       exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
       block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
       kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,
       blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size,
-      blocksparse_head_sliding_step);
+      blocksparse_head_sliding_step, sinks, sliding_window);
 }
 
 // Grid: (num_heads, num_seqs).
@@ -568,13 +591,19 @@ __global__ void paged_attention_v2_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
-    const int max_num_partitions) {
+    const int max_num_partitions,
+    const float* __restrict__ sinks,  // [num_heads] or null
+    const int sliding_window, const int block_size) {
   const int num_heads = gridDim.x;
   const int head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
   const int seq_len = seq_lens[seq_idx];
-  const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
-  if (num_partitions == 1) {
+  // K80 fork (#129): partitions start at the block of the window's first key.
+  const int first_key =
+      sliding_window > 0 ? MAX(seq_len - sliding_window, 0) : 0;
+  const int num_partitions = DIVIDE_ROUND_UP(
+      seq_len - first_key / block_size * block_size, PARTITION_SIZE);
+  if (num_partitions == 1 && sinks == nullptr) {
     // No need to reduce. Only copy tmp_out to out.
     scalar_t* out_ptr =
         out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
@@ -628,6 +657,8 @@ __global__ void paged_attention_v2_reduce_kernel(
   }
   // Broadcast the max value to all threads.
   max_logit = VLLM_SHFL_SYNC(max_logit, 0);
+  // K80 fork (#129): the sink's exp(sink) joins the sum of every partition's.
+  if (sinks != nullptr) max_logit = fmaxf(max_logit, sinks[head_idx]);
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums =
@@ -644,6 +675,7 @@ __global__ void paged_attention_v2_reduce_kernel(
   }
   __syncthreads();
   global_exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], global_exp_sum);
+  if (sinks != nullptr) global_exp_sum += expf(sinks[head_idx] - max_logit);
   const float inv_global_exp_sum = __fdividef(1.0f, global_exp_sum + 1e-6f);
 
   // Aggregate tmp_out to out.
