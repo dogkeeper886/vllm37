@@ -347,6 +347,7 @@ class Qwen2MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,  # K80 fork (#131): GGUF embeddings
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -486,6 +487,10 @@ class Qwen2MoeModel(nn.Module):
                         else:
                             name = remapped_kv_scale_name
                     param = params_dict[name]
+                    # K80 fork (#131): GGUF stores the shared expert gate
+                    # [1, hidden] as a [hidden] vector.
+                    if name.endswith("shared_expert_gate.weight"):
+                        loaded_weight = loaded_weight.view(param.shape)
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)

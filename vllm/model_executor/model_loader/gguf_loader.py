@@ -74,6 +74,15 @@ class GGUFModelLoader(BaseModelLoader):
                         f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
                         f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+        # K80 fork (#131): the same merged experts for these MoE models (as
+        # upstream maps qwen2_moe and qwen3_moe later); FusedMoE loads the
+        # [E, N, K] tensor under expert 0.
+        if model_type in ("qwen2_moe", "qwen3_moe", "olmoe"):
+            model_type = model_type.replace("_", "")
+            for idx in range(config.num_hidden_layers):
+                for proj in ("gate", "up", "down"):
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_{proj}_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.{proj}_proj.weight"
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():

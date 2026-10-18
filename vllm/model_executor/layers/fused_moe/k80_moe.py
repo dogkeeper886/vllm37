@@ -91,10 +91,14 @@ def k80_moe_experts(x: torch.Tensor,
                     activation: str = "silu",
                     apply_router_weight_on_input: bool = False,
                     global_num_experts: int = -1,
-                    expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+                    expert_map: Optional[torch.Tensor] = None,
+                    w2_bits: Optional[int] = None) -> torch.Tensor:
     """MoE experts with int4 or int8 weights in the K80 layout: w13 and w2
-    are (qweight [E, N, K / P], scales [E, N, G], zeros [E, N, G])."""
+    are (qweight [E, N, K / P], scales [E, N, G], zeros [E, N, G]); w2 has
+    w2_bits when it differs (a GGUF Q4_K_M checkpoint pairs Q4_K and Q6_K,
+    #131)."""
     _check(expert_map)
+    w2_bits = bits if w2_bits is None else w2_bits
     num_experts = w13[0].shape[0]
     rows, per_row = _inputs(x, topk_weights, apply_router_weight_on_input)
     num_slots = topk_ids.numel()
@@ -110,7 +114,7 @@ def k80_moe_experts(x: torch.Tensor,
                               per_row, bits)
     a = _act_and_mul(h, activation)
     y = ops.k80_int4_moe_gemm(a, *w2, experts, slots, padded, num_slots, 1,
-                              bits)
+                              w2_bits)
     return _combine(y, topk_weights, apply_router_weight_on_input)
 
 
@@ -243,4 +247,5 @@ def k80_moe_apply(layer: torch.nn.Module,
         x, (layer.k80_w13_qweight, layer.k80_w13_scales, layer.k80_w13_zeros),
         (layer.k80_w2_qweight, layer.k80_w2_scales, layer.k80_w2_zeros),
         layer.k80_bits, topk_weights, topk_ids, activation,
-        apply_router_weight_on_input, global_num_experts, expert_map)
+        apply_router_weight_on_input, global_num_experts, expert_map,
+        getattr(layer, "k80_w2_bits", None))

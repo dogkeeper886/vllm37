@@ -315,10 +315,11 @@ def maybe_override_with_speculators_target_model(
     """
     is_gguf = check_gguf_file(model)
     if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        gguf_model_repo = Path(model).parent
-    else:
-        gguf_model_repo = None
+        # K80 fork (#131): a GGUF file is never a speculators config, and
+        # transformers can't read the config of every GGUF architecture
+        # (olmoe), which hf_config_path then supplies.
+        return model, tokenizer
+    gguf_model_repo = None
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
