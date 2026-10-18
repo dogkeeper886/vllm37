@@ -237,13 +237,30 @@ def get_tokenizer(
                                                     **kwargs)
     else:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                **kwargs,
-            )
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_name,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    **kwargs,
+                )
+            except AttributeError as e:
+                # K80 fork (#126): a transformers 5 tokenizer_config lists
+                # extra_special_tokens (Gemma 4: ["<|video|>"]), where this
+                # transformers (4.57) reads a dict. The tokens are in
+                # tokenizer.json's added tokens already.
+                if "'list' object has no attribute 'keys'" not in str(e):
+                    raise
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_name,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    **{
+                        **kwargs, "extra_special_tokens": {}
+                    },
+                )
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,

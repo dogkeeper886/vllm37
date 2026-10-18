@@ -57,6 +57,12 @@ class GGUFModelLoader(BaseModelLoader):
         """
         config = model_config.hf_config
         model_type = config.model_type
+        if model_type == "gemma4":
+            # K80 fork (#126): transformers (4.57) has no Gemma 4 model to
+            # read parameter names from; the fork's model names them.
+            from vllm.model_executor.models.gemma4 import (
+                gemma4_gguf_name_map)
+            return gemma4_gguf_name_map(config)
         gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
