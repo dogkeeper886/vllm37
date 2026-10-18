@@ -96,7 +96,7 @@ else
   systemd-run --user --unit="$UNIT" --collect --quiet \
     --setenv=MODEL="$MODEL" --setenv=DTYPE="$DTYPE" --setenv=TP_SIZE="$TP_SIZE" \
     --setenv=MAX_MODEL_LEN="$MAX_MODEL_LEN" --setenv=CUDA_VISIBLE_DEVICES="$DEVICES" \
-    --setenv=VLLM_K80_TRACE="$VLLM_K80_TRACE" \
+    --setenv=VLLM_K80_TRACE="$VLLM_K80_TRACE" --setenv=PROFILE= \
     /bin/sh -c 'log=$1; shift; exec "$0" "$@" >"$log" 2>&1' "$ROOT/tools/k80-host/serve.sh" "$LOCAL_LOG" "${EXTRA[@]}"
   start=$(date +%s)
   while :; do
