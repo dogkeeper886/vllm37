@@ -716,11 +716,13 @@ class ModelConfig:
         )
 
         # Interleaved attention is not supported by some backends in V0
+        # (K80 fork, #129: XFormers applies each layer's window in prefill
+        # and in the paged decode kernel).
         if (not self.disable_sliding_window
                 and is_interleaved(self.hf_text_config)
                 and not envs.VLLM_USE_V1
                 and (backend := envs.VLLM_ATTENTION_BACKEND)
-                in ("XFORMERS", "FLASHINFER")):
+                in ("FLASHINFER", )):
             logger.warning_once(
                 "%s has interleaved attention, which is currently not "
                 "supported by the %s backend. Disabling sliding window and "

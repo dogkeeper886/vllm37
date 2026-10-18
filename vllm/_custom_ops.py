@@ -61,13 +61,19 @@ def paged_attention_v1(
     blocksparse_vert_stride: int = 0,
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
+    sinks: Optional[torch.Tensor] = None,
+    sliding_window: int = 0,
 ) -> None:
+    # K80 fork (#129): sinks and sliding_window pass only when set, so a
+    # build without them still serves.
+    extra = ((sinks, sliding_window) if sinks is not None or sliding_window
+             else ())
     torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         k_scale, v_scale, tp_rank, blocksparse_local_blocks,
         blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step)
+        blocksparse_head_sliding_step, *extra)
 
 
 def paged_attention_v2(
@@ -93,13 +99,17 @@ def paged_attention_v2(
     blocksparse_vert_stride: int = 0,
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
+    sinks: Optional[torch.Tensor] = None,
+    sliding_window: int = 0,
 ) -> None:
+    extra = ((sinks, sliding_window) if sinks is not None or sliding_window
+             else ())
     torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+        blocksparse_block_size, blocksparse_head_sliding_step, *extra)
 
 
 def paged_attention_rocm(

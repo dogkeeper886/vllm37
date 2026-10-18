@@ -76,6 +76,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
+  // K80 fork (#129): sinks (float32 [num_heads]) add one logit with no value
+  // to each softmax; sliding_window > 0 keeps the last sliding_window keys.
   ops.def(
       "paged_attention_v1("
       "    Tensor! out, Tensor query, Tensor key_cache,"
@@ -85,7 +87,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step, Tensor? sinks=None,"
+      "    int sliding_window=0) -> ()");
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
   // PagedAttention V2.
@@ -99,7 +102,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step, Tensor? sinks=None,"
+      "    int sliding_window=0) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
 #ifndef USE_ROCM

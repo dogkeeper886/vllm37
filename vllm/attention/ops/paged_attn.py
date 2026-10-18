@@ -105,7 +105,12 @@ class PagedAttention:
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
+        sinks: Optional[torch.Tensor] = None,
+        sliding_window: Optional[int] = None,
     ) -> torch.Tensor:
+        """K80 fork (#129): sinks (float32 [num_heads]) add one logit with no
+        value to each softmax, and a sliding window keeps the last
+        sliding_window keys of each sequence."""
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
@@ -151,6 +156,8 @@ class PagedAttention:
                 blocksparse_vert_stride,
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
+                sinks=sinks,
+                sliding_window=sliding_window or 0,
             )
         else:
             # Run PagedAttention V2.
@@ -189,6 +196,8 @@ class PagedAttention:
                 blocksparse_vert_stride,
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
+                sinks=sinks,
+                sliding_window=sliding_window or 0,
             )
         return output
 
