@@ -12,8 +12,8 @@
  * The report fails on a failed check, a "yes" to the garbage question, an
  * abstain, an option that errored, a run that recorded no reply at all, or a
  * missing replies file -- "0 failed" means every reply was checked and judged.
- * A hot die does not fail it: the replies still count, and the row's tok/s is
- * struck through as invalid (lib/dies.ts).
+ * A hot die does not fail it: the replies still count, and the row's tok/s
+ * carries a ⚠, not comparable (lib/dies.ts).
  */
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -87,10 +87,10 @@ function diesCell(r: Result): string {
     const flags = d.flags.filter((f) => f !== 'idle');
     return `GPU${d.die} ${d.medianMhz} MHz, ${d.startC}→${d.peakC} °C${flags.length ? `, ${flags.join('+')}` : ''}`;
   }).join('; ');
-  return r.dies.valid ? each : `**invalid**: ${r.dies.reason}; ${each}`;
+  return r.dies.valid ? each : `⚠ not comparable: ${r.dies.reason}; ${each}`;
 }
-/** An invalid option's speed is struck through: it measured the die, not the server. */
-const tps = (r: Result, v: unknown) => (r.dies && !r.dies.valid ? `~~${v}~~` : String(v));
+/** An invalid option's speed carries a ⚠: it may show the die, not the server. */
+const tps = (r: Result, v: unknown) => (r.dies && !r.dies.valid ? `${v} ⚠` : String(v));
 const rule = run.dieRule;
 
 const lines = [
@@ -100,7 +100,7 @@ const lines = [
   ...(run.about ? [run.about, ''] : []),
   `**${run.results.length} reply(s), ${judged} judged, ${abstained} abstained, ${notJudged} failed the check, ${failed} failed**` +
     (empty ? ' — no reply was recorded, so nothing was tested' : '') +
-    (invalid ? `; **${invalid} with an invalid die state**, their tok/s struck through` : ''),
+    (invalid ? `; **${invalid} with a die warning (⚠)**: their tok/s may show the die, not the server` : ''),
   '',
   '| Option | Model | Prompt | Checks | Judge | Pass | Prefill tok/s | Decode tok/s | Dies | In / out tok | More | Reply |',
   '|---|---|---|---|---|---|---|---|---|---|---|---|',
@@ -114,7 +114,7 @@ const lines = [
   '',
   ...(rule
     ? [`Dies: each option started once ${dieNames(rule.dies)} read ${rule.startC} °C or less (waiting up to ${rule.coolTimeoutS} s), and shows each die's median SM clock, and its temperature at the start and at the peak, while it ran. ` +
-        `A die at ${rule.stopC} °C, or a sw-power-cap, hw-slowdown, sw-thermal, hw-thermal or power-brake flag, makes the option's tok/s invalid. Read with nvidia-smi; nothing was set.`, '']
+        `A die at ${rule.stopC} °C, or a sw-power-cap, hw-slowdown, sw-thermal, hw-thermal or power-brake flag, marks the option's tok/s ⚠, not comparable with other runs. Read with nvidia-smi; nothing was set.`, '']
     : []),
   ...(server ? [server] : []),
   `Commit ${run.commit.slice(0, 9)}.`,
