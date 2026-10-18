@@ -11,6 +11,9 @@
 #                        docker-compose.yml:docker-compose.ci.yml
 #   VLLM_LOG_DIR         host directory for vLLM and NCCL logs
 #                        (default /tmp/vllm-logs)
+#   HF_HOME              host Hugging Face cache, shared with the host build
+#                        (default ~/.cache/huggingface)
+#   HOST_UID, HOST_GID   user the container runs as (default: this user)
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 TIMEOUT=${1:-600}
@@ -22,6 +25,14 @@ LOG_DIR=${VLLM_LOG_DIR:-$(sed -n 's/^VLLM_LOG_DIR=//p' .env 2>/dev/null | tail -
 LOG_DIR=${LOG_DIR:-/tmp/vllm-logs}
 mkdir -p "$LOG_DIR"
 chmod 777 "$LOG_DIR"
+
+# The container runs as this user (#87), so the Hugging Face cache it shares
+# with the host build stays the user's. Create the cache first, or Docker
+# creates it root-owned.
+export HOST_UID=${HOST_UID:-$(id -u)} HOST_GID=${HOST_GID:-$(id -g)}
+HF_DIR=${HF_HOME:-$(sed -n 's/^HF_HOME=//p' .env 2>/dev/null | tail -1)}
+HF_DIR=${HF_DIR:-$HOME/.cache/huggingface}
+mkdir -p "${HF_DIR/#\~/$HOME}"
 
 if ! docker compose up -d; then
   echo "Container did not start."
