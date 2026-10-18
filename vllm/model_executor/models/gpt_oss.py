@@ -148,9 +148,12 @@ class MLPBlock(torch.nn.Module):
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
+        # K80 fork (#128): the model dtype, not bfloat16, which Kepler's
+        # cuBLAS cannot multiply (and float32 or float16 activations could
+        # not meet).
         self.router = torch.nn.Linear(config.hidden_size,
                                       config.num_local_experts,
-                                      dtype=torch.bfloat16)
+                                      dtype=torch.get_default_dtype())
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
                                 top_k=config.num_experts_per_tok,

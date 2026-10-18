@@ -79,10 +79,10 @@ Official vLLM enforces `get_min_capability()` at `vllm/config/vllm.py:943`.
 | GPTQ (Qwen, Hunyuan) | GPTQ | 60; Exllama uses half2 (sm_53); Hunyuan's `desc_act=true` is rejected on any GPU | `auto_gptq.py:177-183`; `gptq_utils.py:32-37` |
 | compressed-tensors w4a16 (Gemma 4 QAT) | compressed-tensors | 70 (config) / 75 (scheme) | Part 4 |
 | NVFP4 (NVIDIA re-releases, Granite) | ModelOpt / compressed-tensors | 75 | Parts 4, 5 |
-| MXFP4 (gpt-oss, Granite) | `Mxfp4Config` | 80 | `mxfp4.py:67-77` |
+| MXFP4 (gpt-oss, Granite) | `Mxfp4Config` | 80; the fork runs gpt-oss's MXFP4 experts on the K80 MoE kernels as stored (#128) | `mxfp4.py:67-77`; `vllm37:mxfp4.py` `K80Mxfp4MoEMethod` |
 | GGUF | moved out of official main (vllm-gguf-plugin); the fork runs it on Kepler through the K80 GGUF kernels and the K80 int4 and int8 layouts (#107, #111, #109) | — | Part 9.4; `vllm37:k80_gguf.py` |
 
-**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74); int8 compressed-tensors and GPTQ checkpoints use the same layout with 4 values per word (#109). GGUF files load too (#107, #111): Q4_K and Q6_K run as stored, Q4_0, Q4_1 and Q8_0 tensors use the int4 or int8 layout, and other types are dequantized at load. Everything else is BF16 safetensors, loaded as FP32 or FP16.
+**Upstream refuses every quantized format on K80; the refusal is about kernels, not the formats themselves.** Part 9 gives the exact instruction each kernel needs. The fork now loads weight-only int4 compressed-tensors, GPTQ and AWQ checkpoints by repacking them into one K80 layout (#73) and runs them on K80 kernels (#74); int8 compressed-tensors and GPTQ checkpoints use the same layout with 4 values per word (#109). GGUF files load too (#107, #111): Q4_K and Q6_K run as stored, Q4_0, Q4_1 and Q8_0 tensors use the int4 or int8 layout, and other types are dequantized at load. gpt-oss's MXFP4 experts run as stored, with one E8M0 scale byte per 32 weights (#128). Everything else is BF16 safetensors, loaded as FP32 or FP16.
 
 ### 1.5 Ranking by porting cost
 
