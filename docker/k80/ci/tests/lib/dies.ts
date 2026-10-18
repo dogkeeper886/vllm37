@@ -5,11 +5,10 @@
  * 88 °C, so a tok/s from a hot die measures the throttle, not the server.
  *
  *   const dies = watchDies(2, { startC: 60, stopC: 80 })   nvidia-smi -lms 100, dies 0-1
- *   const gate = await dies.cool()                         every die ≤ startC, or a timeout
+ *   const gate = await dies.cool()                         waits until every die ≤ startC
  *   ... the option's calls, from → to ...
  *   dies.state(from, to, gate)                             per die: clock, °C, W, flags
- *     └─ invalid when a die reached stopC or raised a fault flag in the window,
- *        or the option started before the dies cooled
+ *     └─ invalid when a die reached stopC or raised a fault flag in the window
  *   dies.close()
  *
  * Reads only: nvidia-smi is asked, never set; no clock, power limit or
@@ -43,16 +42,12 @@ export interface DieRule {
   startC: number;
   /** A die at this many °C makes the option invalid. */
   stopC: number;
-  /** Longest wait for the dies to cool, in seconds. */
-  coolTimeoutS: number;
 }
 
 export interface Gate {
   waitedS: number;
   /** Each die's °C when the option started. */
   startC: Record<number, number>;
-  /** The dies were still above startC when the wait ran out. */
-  timedOut: boolean;
 }
 
 export interface DieState {
@@ -93,8 +88,8 @@ export interface Dies {
   close(): void;
 }
 
-export function watchDies(count: number, opts: { startC: number; stopC: number; coolTimeoutS?: number; intervalMs?: number }): Dies {
-  const rule: DieRule = { dies: [...Array(count).keys()], startC: opts.startC, stopC: opts.stopC, coolTimeoutS: opts.coolTimeoutS ?? 300 };
+export function watchDies(count: number, opts: { startC: number; stopC: number; intervalMs?: number }): Dies {
+  const rule: DieRule = { dies: [...Array(count).keys()], startC: opts.startC, stopC: opts.stopC };
   const samples: Sample[] = [];
   const latest = new Map<number, Sample>();
   let failure = '';
@@ -123,19 +118,13 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
       while (!cooled()) {
         // No reading to wait on: state() says so, and the replies still count.
         if (failure) break;
-        if (Date.now() - start > rule.coolTimeoutS * 1000) {
-          return { waitedS: Math.round((Date.now() - start) / 1000), startC: now(), timedOut: true };
-        }
         await new Promise((r) => setTimeout(r, 250));
       }
-      return { waitedS: Math.round((Date.now() - start) / 1000), startC: now(), timedOut: false };
+      return { waitedS: Math.round((Date.now() - start) / 1000), startC: now() };
     },
 
     state(from: number, to: number, gate: Gate): DieState {
       const reasons: string[] = [];
-      if (gate.timedOut) {
-        reasons.push(`started above ${rule.startC} °C after ${gate.waitedS} s (${rule.dies.map((d) => `GPU${d} ${gate.startC[d]} °C`).join(', ')})`);
-      }
       const dies = rule.dies.map((die) => {
         let x = samples.filter((s) => s.die === die && s.t >= from && s.t <= to);
         // A window shorter than one pass over the dies: the last reading before it ends.
