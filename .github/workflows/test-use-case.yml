@@ -1,0 +1,117 @@
+name: "Test: use case"
+
+# Each profile in docker/k80/models/ is a model vllm37 supports, with its own
+# start-up flags. Each is a job with a server of its own, started from the
+# profile as written: does the model still serve and answer, and what memory
+# and speed does it hold? One pass each: short-answer, then speech-rewrite once,
+# and the judge reads both replies. The function tests (test-*.yml) ask whether
+# a change broke vllm37, on the baseline; this asks whether each model still
+# runs. A new model is a new profile, not an edit here.
+# Values come from the Run form, else the repository variable, else every
+# profile.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: "Profiles from docker/k80/models/ to run, comma separated; one job each (empty = repository variable TEST_PROFILES, else every profile)"
+        default: ""
+        type: string
+      server:
+        description: "Build to serve: docker = the image on the runner, local = the host build's working tree (empty = repository variable TEST_SERVER)"
+        default: ""
+        type: string
+
+jobs:
+  # The profiles, checked and turned into the matrix below.
+  plan:
+    name: plan
+    runs-on: [self-hosted, vllm]
+    timeout-minutes: 5
+    outputs:
+      profiles: ${{ steps.list.outputs.profiles }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - id: list
+        env:
+          PROFILES: ${{ inputs.profiles || vars.TEST_PROFILES }}
+          SERVER: ${{ inputs.server || vars.TEST_SERVER }}
+        run: |
+          set -euo pipefail
+          ALL=$(cd docker/k80/models && ls *.yaml | sed 's/\.yaml$//' | tr '\n' ' ')
+          PROFILES=${PROFILES// /}
+          PROFILES=${PROFILES:-$(echo $ALL | tr ' ' ',')}
+          out=""
+          for p in ${PROFILES//,/ }; do
+            case " $ALL " in
+              *" $p "*) out+="${out:+,}\"$p\"" ;;
+              *) echo "::error::profiles: no profile is named '$p'; the profiles are ${ALL% }"; exit 1 ;;
+            esac
+          done
+          echo "profiles=[$out]" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Plan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Profiles | ${PROFILES//,/, } |"
+            echo "| Server | ${SERVER:-docker (default)} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  use-case:
+    needs: plan
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+    name: use-case (${{ matrix.profile }})
+    runs-on: [self-hosted, vllm]
+    # One job at a time on the cards, whichever workflow it belongs to.
+    concurrency:
+      group: k80-hardware
+      cancel-in-progress: false
+    # The server start, one pass and the judge. No build: a run never builds.
+    timeout-minutes: 90
+    env:
+      # The judge: a model on an ollama server.
+      JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      VLLM_LOG_DIR: /tmp/k80-ci-logs
+      # Each option starts once its dies read TEST_START_TEMP °C or less; a die
+      # at TEST_STOP_TEMP °C, or a throttle flag, makes its tok/s invalid.
+      TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
+      TEST_STOP_TEMP: ${{ vars.TEST_STOP_TEMP || '80' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/test
+        with:
+          test: use-case-${{ matrix.profile }}
+          profile: ${{ matrix.profile }}
+          server: ${{ inputs.server || vars.TEST_SERVER }}
+          prompt: speech-rewrite
+      # Whatever happened above, cancel and timeout included: the cards go back.
+      - uses: ./.github/actions/test-end
+        if: always()
+
+  # One table over every profile's report. No cards: it only reads the reports.
+  summary:
+    needs: [plan, use-case]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    name: summary
+    runs-on: [self-hosted, vllm]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: ./.github/actions/setup-tests
+      # No report at all (every job failed before its upload) is not an error here.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: "*-report"
+          path: docker/k80/ci/tests/reports
+      - name: Summary
+        working-directory: docker/k80/ci/tests
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: npx tsx summary.ts --input reports

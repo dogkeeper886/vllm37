@@ -1,0 +1,12 @@
+# gemma-4-26B-A4B from Google's QAT Q4_0 GGUF, text only (#126): TP=2 inside
+# each board and PP=2 across them, all four dies. The GGUF has no tokenizer or
+# config vLLM can read, so both come from the -it repository.
+# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+# ${HF_CACHE} is the Hugging Face cache as the server sees it.
+model: ${HF_CACHE}/hub/models--google--gemma-4-26B-A4B-it-qat-q4_0-gguf/snapshots/d1c082be9cf3c8a514acf63b8761f4b41935842e/gemma-4-26B_q4_0-it.gguf
+tokenizer: google/gemma-4-26B-A4B-it
+hf-config-path: google/gemma-4-26B-A4B-it
+dtype: float32
+tensor-parallel-size: 2
+pipeline-parallel-size: 2
+max-model-len: 8192
