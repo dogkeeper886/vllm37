@@ -43,9 +43,12 @@ def _act_and_mul(h: torch.Tensor, activation: str) -> torch.Tensor:
         torch.ops._C.silu_and_mul(out, h)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(out, h)
+    elif activation == "gelu_tanh":  # Gemma 4 experts (#126)
+        torch.ops._C.gelu_tanh_and_mul(out, h)
     else:
         raise NotImplementedError(
-            f"K80 MoE experts support silu and gelu, not {activation}")
+            f"K80 MoE experts support silu, gelu and gelu_tanh, not "
+            f"{activation}")
     return out
 
 
