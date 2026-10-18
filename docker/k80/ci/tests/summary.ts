@@ -9,7 +9,7 @@
  * workflow's needs context, names the jobs that left no report. It judges
  * nothing and fails nothing: each test job already passed or failed on its
  * judged replies. An option whose dies ran hot or throttled has its tok/s
- * struck through and counts in no total.
+ * marked ⚠, not comparable with other runs.
  */
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -47,9 +47,9 @@ for (const { report, server } of runs) {
     const m = results[0]?.metrics;
     const d = results[0]?.dies;
     const total = m ? String(m.totalDecodeTps ?? m.decodeTps) : '—';
-    const decode = m && d && !d.valid ? `~~${total}~~` : total;
+    const decode = m && d && !d.valid ? `${total} ⚠` : total;
     const dies = d
-      ? `${d.valid ? '' : `**invalid**: ${d.reason}; `}peak ${Math.max(...d.dies.map((x) => x.peakC))} °C, ` +
+      ? `${d.valid ? '' : `⚠ not comparable: ${d.reason}; `}peak ${Math.max(...d.dies.map((x) => x.peakC))} °C, ` +
         `clock ≥ ${Math.min(...d.dies.map((x) => x.medianMhz))} MHz`
       : '—';
     rows.push(`| ${report.test} | ${cell(option)}; ${served(server)} | ${results.length} | ${judged} | ${failed} | ${decode} | ${cell(dies)} | ${build(server)} |`);
@@ -73,7 +73,7 @@ const md = [
   ...(rows.length ? rows : ['| — | no report was uploaded | — | — | — | — | — | — |']),
   '',
   'Decode tok/s is the total of all calls in the option. Failed counts the replies that failed a check or the judge, and the errors.',
-  'Dies: the hottest die\'s peak temperature and the lowest median SM clock while the option ran. A struck-through tok/s is invalid: a die ran hot or throttled, so it measured the die, not the server.',
+  'Dies: the hottest die\'s peak temperature and the lowest median SM clock while the option ran. A ⚠ tok/s ran with a die that was hot, slowed or not sampled (reason in Dies), so it is not comparable with other runs.',
   ...(jobs.length ? ['', `Jobs: ${jobs.join(' · ')}.`] : []),
   '',
 ].join('\n');

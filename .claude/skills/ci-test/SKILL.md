@@ -22,5 +22,5 @@ description: >-
 6. To change the standing values, set the repository variable: `gh variable list -R dogkeeper886/vllm37` shows `TEST_*`, and `gh variable set <name> -R dogkeeper886/vllm37 --body <value>` changes one.
 7. `gh run list -R dogkeeper886/vllm37 --workflow <file> --limit 1`
 8. `gh run watch <run-id> -R dogkeeper886/vllm37 --exit-status`
-9. `gh run download <run-id> -R dogkeeper886/vllm37`, then read `report.json` and `server.json`; a `test-all.yml` run has one folder per test job and the summary table on the run page. Each row's `dies` holds every die's clock and peak temperature; a tok/s with `dies.valid: false`, struck through in the tables, measured a hot or throttled die, so quote it only with its `dies.reason`.
+9. `gh run download <run-id> -R dogkeeper886/vllm37`, then read `report.json` and `server.json`; a `test-all.yml` run has one folder per test job and the summary table on the run page. Each row's `dies` holds every die's clock and peak temperature; a tok/s with `dies.valid: false`, marked ⚠ in the tables, measured a hot or throttled die, so quote it only with its `dies.reason`.
 10. Dispatch the next test after this run ends: the lock keeps one waiting run and cancels an older one.
