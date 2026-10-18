@@ -8,13 +8,14 @@ name: "Test: use case"
 # a change broke vllm37, on the baseline; this asks whether each model still
 # runs. A new model is a new profile, not an edit here.
 # Values come from the Run form, else the repository variable, else every
-# profile.
+# profile but the baseline, qwen3-0.6b: the function tests serve it on every
+# run, so a use-case run names it to serve it.
 
 on:
   workflow_dispatch:
     inputs:
       profiles:
-        description: "Profiles from docker/k80/models/ to run, comma separated; one job each (empty = repository variable TEST_PROFILES, else every profile)"
+        description: "Profiles from docker/k80/models/ to run, comma separated; one job each (empty = repository variable TEST_PROFILES, else every profile but the baseline qwen3-0.6b)"
         default: ""
         type: string
       server:
@@ -39,8 +40,11 @@ jobs:
         run: |
           set -euo pipefail
           ALL=$(cd docker/k80/models && ls *.yaml | sed 's/\.yaml$//' | tr '\n' ' ')
+          # The function-test baseline (service-start.sh's default profile).
+          BASELINE=qwen3-0.6b
+          DEFAULT=$(echo " $ALL " | sed "s/ $BASELINE / /")
           PROFILES=${PROFILES// /}
-          PROFILES=${PROFILES:-$(echo $ALL | tr ' ' ',')}
+          PROFILES=${PROFILES:-$(echo $DEFAULT | tr ' ' ',')}
           out=""
           for p in ${PROFILES//,/ }; do
             case " $ALL " in
