@@ -469,6 +469,32 @@ def k80_moe_dense_gemm(x: torch.Tensor, w: torch.Tensor,
     return torch.ops._C.k80_moe_dense_gemm(x, w, expert_ids, rows_per_input)
 
 
+# K80 fork (#128): k80_int4_moe_gemm for MXFP4 experts: qweight int32
+# [E, N, K / 8], the E2M1 codes as gpt-oss stores them, and scales uint8
+# [E, N, K / 32], their E8M0 exponents.
+def k80_mxfp4_moe_gemm(x: torch.Tensor, qweight: torch.Tensor,
+                       scales: torch.Tensor, expert_ids: torch.Tensor,
+                       slots: Optional[torch.Tensor],
+                       padded: Optional[torch.Tensor], num_slots: int,
+                       rows_per_input: int) -> torch.Tensor:
+    return torch.ops._C.k80_mxfp4_moe_gemm(x, qweight, scales, expert_ids,
+                                           slots, padded, num_slots,
+                                           rows_per_input)
+
+
+if hasattr(torch.ops._C, "k80_mxfp4_moe_gemm"):
+
+    @register_fake("_C::k80_mxfp4_moe_gemm")
+    def _k80_mxfp4_moe_gemm_fake(x: torch.Tensor, qweight: torch.Tensor,
+                                 scales: torch.Tensor,
+                                 expert_ids: torch.Tensor,
+                                 slots: Optional[torch.Tensor],
+                                 padded: Optional[torch.Tensor],
+                                 num_slots: int,
+                                 rows_per_input: int) -> torch.Tensor:
+        return x.new_empty((num_slots, qweight.size(1)))
+
+
 if hasattr(torch.ops._C, "k80_moe_dense_gemm"):
 
     @register_fake("_C::k80_moe_dense_gemm")

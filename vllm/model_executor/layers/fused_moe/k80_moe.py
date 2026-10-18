@@ -12,12 +12,15 @@
 #       above, the slots grouped by expert in blocks of 8
 #       (moe_align_block_size), so a block reads its expert's weights once.
 #       Neither syncs with the host, so CUDA graphs can capture both.
+#   MXFP4 experts (k80_mxfp4_experts, #128): k80_mxfp4_moe_gemm, the same
+#       product on gpt-oss's E2M1 codes and E8M0 scales as stored, with the
+#       experts' biases.
 #   FP16 / FP32 experts (k80_fused_experts): up to K80_MOE_PAIR_SLOTS slots,
 #       or while a CUDA graph is captured, k80_moe_dense_gemm, one block row
 #       per slot reading its expert's weights in place (no host sync); above,
 #       one cuBLAS product per expert that has tokens.
-# Both then apply silu_and_mul or gelu_and_mul between the two products and
-# add the slots of a token with its routing weights (moe_sum).
+# Each then applies silu_and_mul, gelu_and_mul or swiglu_oai between the two
+# products and adds the slots of a token with its routing weights (moe_sum).
 
 from typing import Optional
 
@@ -35,6 +38,11 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 K80_MOE_PAIR_SLOTS = 512
 # Slots per block of the grouped int4/int8 product (kMoeBlock in int4.cu).
 K80_MOE_BLOCK = 8
+# Slots per call of k80_mxfp4_experts: a longer batch goes in chunks of
+# tokens, so its per-slot buffers stay small. gpt-oss-20b's 8,192-token
+# profile run (32,768 slots) took about 1.7 GiB in them and ran out of memory
+# on a die at TP=2 (#128).
+K80_MOE_CHUNK_SLOTS = 4096
 
 
 def _act_and_mul(h: torch.Tensor, activation: str) -> torch.Tensor:
@@ -45,10 +53,16 @@ def _act_and_mul(h: torch.Tensor, activation: str) -> torch.Tensor:
         torch.ops._C.gelu_and_mul(out, h)
     elif activation == "gelu_tanh":  # Gemma 4 experts (#126)
         torch.ops._C.gelu_tanh_and_mul(out, h)
+    elif activation == "swiglu_oai":  # gpt-oss experts (#128)
+        # Gate and up interleaved, as fused_experts' swiglu_oai reads them.
+        gate = h[:, ::2].clamp(max=7.0)
+        up = h[:, 1::2].clamp(min=-7.0, max=7.0)
+        torch.mul(gate, torch.sigmoid(gate * 1.702), out=out)
+        out.mul_(up + 1)
     else:
         raise NotImplementedError(
-            f"K80 MoE experts support silu, gelu and gelu_tanh, not "
-            f"{activation}")
+            f"K80 MoE experts support silu, gelu, gelu_tanh and swiglu_oai, "
+            f"not {activation}")
     return out
 
 
@@ -85,6 +99,20 @@ def _check(expert_map: Optional[torch.Tensor], **unsupported) -> None:
                                   "supported")
 
 
+def _slots(
+    topk_ids: torch.Tensor, num_experts: int
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """(experts, slots, padded) of the K80 MoE products: one expert per slot
+    up to K80_MOE_PAIR_SLOTS slots, else the slots grouped by expert."""
+    if topk_ids.numel() <= K80_MOE_PAIR_SLOTS:
+        return topk_ids.to(torch.int32).flatten(), None, None
+    slots, experts, padded = moe_align_block_size(topk_ids,
+                                                  K80_MOE_BLOCK,
+                                                  num_experts,
+                                                  pad_sorted_ids=True)
+    return experts, slots, padded
+
+
 def k80_moe_experts(x: torch.Tensor,
                     w13: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
                     w2: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -105,19 +133,53 @@ def k80_moe_experts(x: torch.Tensor,
     num_experts = w13[0].shape[0]
     rows, per_row = _inputs(x, topk_weights, apply_router_weight_on_input)
     num_slots = topk_ids.numel()
-    if num_slots <= K80_MOE_PAIR_SLOTS:
-        experts = topk_ids.to(torch.int32).flatten()
-        slots = padded = None
-    else:
-        slots, experts, padded = moe_align_block_size(topk_ids,
-                                                      K80_MOE_BLOCK,
-                                                      num_experts,
-                                                      pad_sorted_ids=True)
+    experts, slots, padded = _slots(topk_ids, num_experts)
     h = ops.k80_int4_moe_gemm(rows, *w13, experts, slots, padded, num_slots,
                               per_row, bits)
     a = _act_and_mul(h, activation)
     y = ops.k80_int4_moe_gemm(a, *w2, experts, slots, padded, num_slots, 1,
                               w2_bits)
+    return _combine(y, topk_weights, apply_router_weight_on_input)
+
+
+def k80_mxfp4_experts(x: torch.Tensor,
+                      w13: tuple[torch.Tensor, torch.Tensor],
+                      w2: tuple[torch.Tensor, torch.Tensor],
+                      topk_weights: torch.Tensor,
+                      topk_ids: torch.Tensor,
+                      activation: str = "swiglu_oai",
+                      w13_bias: Optional[torch.Tensor] = None,
+                      w2_bias: Optional[torch.Tensor] = None,
+                      apply_router_weight_on_input: bool = False,
+                      expert_map: Optional[torch.Tensor] = None
+                      ) -> torch.Tensor:
+    """MoE experts with MXFP4 weights as gpt-oss stores them: w13 and w2 are
+    (qweight int32 [E, N, K / 8], scales uint8 [E, N, K / 32]), and the
+    biases [E, N] are added to each product."""
+    _check(expert_map)
+    step = max(1, K80_MOE_CHUNK_SLOTS // topk_ids.shape[1])
+    if topk_ids.shape[0] > step:
+        out = x.new_empty((x.shape[0], w2[0].shape[1]))
+        for a in range(0, topk_ids.shape[0], step):
+            b = a + step
+            out[a:b] = k80_mxfp4_experts(x[a:b], w13, w2, topk_weights[a:b],
+                                         topk_ids[a:b], activation, w13_bias,
+                                         w2_bias,
+                                         apply_router_weight_on_input,
+                                         expert_map)
+        return out
+    rows, per_row = _inputs(x, topk_weights, apply_router_weight_on_input)
+    num_slots = topk_ids.numel()
+    experts, slots, padded = _slots(topk_ids, w13[0].shape[0])
+    ids = topk_ids.flatten().long()
+    h = ops.k80_mxfp4_moe_gemm(rows, *w13, experts, slots, padded, num_slots,
+                               per_row)
+    if w13_bias is not None:
+        h += w13_bias[ids]
+    y = ops.k80_mxfp4_moe_gemm(_act_and_mul(h, activation), *w2, experts,
+                               slots, padded, num_slots, 1)
+    if w2_bias is not None:
+        y += w2_bias[ids]
     return _combine(y, topk_weights, apply_router_weight_on_input)
 
 

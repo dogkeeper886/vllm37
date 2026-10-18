@@ -68,6 +68,12 @@ class Mxfp4Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             raise NotImplementedError("Mxfp4 linear layer is not implemented")
         elif isinstance(layer, FusedMoE):
+            # K80 fork (#128): Kepler runs neither the Triton nor the
+            # FlashInfer MXFP4 experts.
+            from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+                on_kepler)
+            if on_kepler():
+                return K80Mxfp4MoEMethod(layer.moe_config)
             return Mxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             raise NotImplementedError(
@@ -464,3 +470,93 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_precision=self.w2_precision_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
+
+class K80Mxfp4MoEMethod(FusedMoEMethodBase):
+    """K80 fork (#128): MXFP4 experts on Kepler, run as stored by
+    k80_mxfp4_moe_gemm (fused_moe/k80_moe.py): the E2M1 codes, two per byte,
+    seen as int32 words [E, N, K / 8], and the E8M0 scales uint8
+    [E, N, K / 32]. No padding, so each die's share of K must hold whole
+    blocks of 32; the biases are kept in the model dtype."""
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__()
+        self.moe = moe
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        mxfp4_block = 32
+        inter = intermediate_size_per_partition
+        for name, k in (("hidden", hidden_size), ("intermediate", inter)):
+            if k % mxfp4_block:
+                raise ValueError(
+                    f"K80 MXFP4 experts: {k} {name} features per die do not "
+                    f"divide into MXFP4 blocks of {mxfp4_block}; use fewer "
+                    "dies (tensor_parallel_size)")
+        for name, shape, dtype in (
+            ("w13_weight", (2 * inter, hidden_size // 2), torch.uint8),
+            ("w13_weight_scale", (2 * inter, hidden_size // mxfp4_block),
+             torch.uint8),
+            ("w13_bias", (2 * inter, ), params_dtype),
+            ("w2_weight", (hidden_size, inter // 2), torch.uint8),
+            ("w2_weight_scale", (hidden_size, inter // mxfp4_block),
+             torch.uint8),
+            ("w2_bias", (hidden_size, ), params_dtype),
+        ):
+            param = torch.nn.Parameter(torch.zeros(num_experts,
+                                                   *shape,
+                                                   dtype=dtype),
+                                       requires_grad=False)
+            layer.register_parameter(name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        for name in ("w13_weight", "w2_weight"):
+            codes = getattr(layer, name).data
+            setattr(layer, name,
+                    Parameter(codes.view(torch.int32), requires_grad=False))
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.k80_moe import (
+            k80_mxfp4_experts)
+        if enable_eplb:
+            raise NotImplementedError(
+                "K80 MoE experts: no expert load balancing")
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+        return k80_mxfp4_experts(
+            x, (layer.w13_weight, layer.w13_weight_scale),
+            (layer.w2_weight, layer.w2_weight_scale), topk_weights, topk_ids,
+            activation, layer.w13_bias, layer.w2_bias,
+            apply_router_weight_on_input, expert_map)

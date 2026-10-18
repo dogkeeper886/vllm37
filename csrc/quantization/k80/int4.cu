@@ -21,6 +21,9 @@
 //                        no host sync.
 //   k80_moe_dense_gemm   the pair mode of k80_int4_moe_gemm for FP32 or FP16
 //                        expert weights [E, N, K], read in place (#119).
+//   k80_mxfp4_moe_gemm   k80_int4_moe_gemm for MXFP4 experts (#128): 4-bit
+//                        E2M1 codes [E, N, K / 8] as gpt-oss stores them, and
+//                        one E8M0 exponent byte per 32 weights [E, N, K / 32].
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -61,6 +64,61 @@ __device__ __forceinline__ void unpack<8>(uint32_t q, float* v) {
   v[0] = magic_byte<0>(q); v[1] = magic_byte<1>(q);
   v[2] = magic_byte<2>(q); v[3] = magic_byte<3>(q);
 }
+
+// How gemm_tile reads a weight format: P values per word, the values of a
+// word as floats d (a fixed offset goes in the zero), and a group's scale s
+// and zero z, so w = (d - z) s.
+//   Int<B>  B-bit integers, fp32 scales and zeros [N, G].
+//   Mxfp4   E2M1 codes, value i of a word in bits 4i and up (byte j: value 2j
+//           low, 2j + 1 high, as gpt-oss and the int4 layout pack them), and
+//           one E8M0 byte e per 32 weights [N, G]: w = 2^(e - 127) v, v in
+//           {0, +-0.5, +-1, +-1.5, +-2, +-3, +-4, +-6} (#128).
+template <int B>
+struct Int {
+  static constexpr int P = 32 / B;
+  using Scale = float;
+  static __device__ __forceinline__ void decode(uint32_t q, float* v) {
+    unpack<B>(q, v);
+#pragma unroll
+    for (int j = 0; j < P; ++j) v[j] -= 8388608.0f;
+  }
+  static __device__ __forceinline__ float scale(const float* sc, size_t i) {
+    return __ldg(sc + i);
+  }
+  static __device__ __forceinline__ float zero(const float* zr, size_t i) {
+    return __ldg(zr + i);
+  }
+};
+
+struct Mxfp4 {
+  static constexpr int P = 8;
+  using Scale = uint8_t;
+  // ollama37's mmvq-k80.cu lookup, 4 values at a time: one PRMT on the codes'
+  // low 3 bits gives each magnitude as 64 + 2|2v| from {0, 1, 2, 3, 4, 6, 8,
+  // 12}, a second on the sign bits gives 0x7F for each negative value, and
+  // (m ^ neg) + 1 = 128 - m.  That byte in bits 16..23 of 32.0f is the float
+  // 48 + 2v, exactly.
+  static __device__ __forceinline__ void decode(uint32_t q, float* v) {
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const uint32_t c = q >> (16 * h);
+      const uint32_t m = __byte_perm(0x4C484440u, 0x70605850u, c);
+      const uint32_t neg = __byte_perm(0u, 0x7F7F7F7Fu, c >> 1);
+      const uint32_t b = (m ^ neg) + (neg & 0x01010101u);
+      v[4 * h + 0] = __int_as_float(__byte_perm(b, 0x42000000u, 0x7044));
+      v[4 * h + 1] = __int_as_float(__byte_perm(b, 0x42000000u, 0x7144));
+      v[4 * h + 2] = __int_as_float(__byte_perm(b, 0x42000000u, 0x7244));
+      v[4 * h + 3] = __int_as_float(__byte_perm(b, 0x42000000u, 0x7344));
+    }
+  }
+  // 2^(e - 128), the half that undoes 2v; 0 for e <= 1 (below 2^-127).
+  static __device__ __forceinline__ float scale(const uint8_t* sc, size_t i) {
+    return __int_as_float(max((int)__ldg(sc + i) - 1, 0) << 23);
+  }
+  static __device__ __forceinline__ float zero(const float*, size_t) {
+    return 48.0f;
+  }
+};
 
 // 8 activations (16-byte aligned) as floats; one output from a float.
 template <typename T>
@@ -142,22 +200,22 @@ struct SlotRows {
   __device__ __forceinline__ bool valid(int m) const { return y[m] != nullptr; }
 };
 
-// y[M, N] = x[M, K] W^T, B-bit weights, for the M rows of `rows`.  A warp
-// computes R output features from row0 for all M rows.  Lane t covers K = base .. base + E - 1, base = E (t + 32 s)
-// at step s: it loads the E B / 32 words of each of the R features at once
+// y[M, N] = x[M, K] W^T, weights in format F, for the M rows of `rows`.  A
+// warp computes R output features from row0 for all M rows.  Lane t covers K = base .. base + E - 1, base = E (t + 32 s)
+// at step s: it loads the E / P words of each of the R features at once
 // and the E inputs of each row once, so M * E inputs stay in registers (E =
 // 32 up to 2 rows, 16 up to 4, then 8).  Sum (q - z) x = sum q x - z sum x,
 // so the zero costs one FMA per E weights.  Needs K % E == 0 and group size
 // % E == 0.
-template <int R, int M, int E, int B, typename T, typename Rows>
+template <int R, int M, int E, typename F, typename T, typename Rows>
 __device__ __forceinline__ void gemm_tile(const Rows& rows,
                                           const uint32_t* __restrict__ qw,
-                                          const float* __restrict__ sc,
+                                          const typename F::Scale* __restrict__ sc,
                                           const float* __restrict__ zr,
                                           int row0, int N, int K, int G,
                                           int gs) {
-  constexpr int P = 32 / B;  // values per word
-  constexpr int W = E / P;   // words per row per step
+  constexpr int P = F::P;   // values per word
+  constexpr int W = E / P;  // words per row per step
   const int lane = threadIdx.x;
   const int row_words = K / P;
   float acc[R][M];
@@ -185,8 +243,8 @@ __device__ __forceinline__ void gemm_tile(const Rows& rows,
     for (int r = 0; r < R; ++r) {
       const int rr = min(row0 + r, N - 1);
       Words<W>::load(qw + (size_t)rr * row_words + base / P, q[r]);
-      s[r] = __ldg(sc + (size_t)rr * G + g);
-      z[r] = __ldg(zr + (size_t)rr * G + g);
+      s[r] = F::scale(sc, (size_t)rr * G + g);
+      z[r] = F::zero(zr, (size_t)rr * G + g);
     }
 #pragma unroll
     for (int r = 0; r < R; ++r) {
@@ -196,9 +254,7 @@ __device__ __forceinline__ void gemm_tile(const Rows& rows,
 #pragma unroll
       for (int i = 0; i < W; ++i) {
         float v[P];
-        unpack<B>(q[r][i], v);
-#pragma unroll
-        for (int j = 0; j < P; ++j) v[j] -= 8388608.0f;
+        F::decode(q[r][i], v);
 #pragma unroll
         for (int m = 0; m < M; ++m)
 #pragma unroll
@@ -230,7 +286,7 @@ __global__ void __launch_bounds__(kWarp* kWarps)
   const int row0 = (blockIdx.x * kWarps + threadIdx.y) * R;
   if (row0 >= N) return;
   const DenseRows<T> rows{x, y, K, N};
-  gemm_tile<R, M, E, B, T>(rows, qw, sc, zr, row0, N, K, G, gs);
+  gemm_tile<R, M, E, Int<B>, T>(rows, qw, sc, zr, row0, N, K, G, gs);
 }
 
 // MoE experts: weights [E, N, K / P] and scales, zeros [E, N, G].  Block row
@@ -239,10 +295,11 @@ __global__ void __launch_bounds__(kWarp* kWarps)
 // padding (moe_align_block_size's sorted_token_ids).  Slot s reads input row
 // s / div and writes output row s.  Block rows from padded[0] / M on are
 // empty.
-template <int R, int M, int E, int B, typename T>
+template <int R, int M, int E, typename F, typename T>
 __global__ void __launch_bounds__(kWarp* kWarps)
     moe_gemm_kernel(const T* __restrict__ x, const uint32_t* __restrict__ qw,
-                    const float* __restrict__ sc, const float* __restrict__ zr,
+                    const typename F::Scale* __restrict__ sc,
+                    const float* __restrict__ zr,
                     T* __restrict__ y, const int* __restrict__ experts,
                     const int* __restrict__ slots,
                     const int* __restrict__ padded, int S, int div, int N,
@@ -262,8 +319,9 @@ __global__ void __launch_bounds__(kWarp* kWarps)
     rows.y[m] = valid ? y + (size_t)s * N : nullptr;
   }
   const size_t first = (size_t)e * N;  // the expert's first weight row
-  gemm_tile<R, M, E, B, T>(rows, qw + first * (K / (32 / B)), sc + first * G,
-                           zr + first * G, row0, N, K, G, gs);
+  gemm_tile<R, M, E, F, T>(rows, qw + first * (K / F::P), sc + first * G,
+                           zr == nullptr ? nullptr : zr + first * G, row0, N,
+                           K, G, gs);
 }
 
 template <int R, int M, int E, int B, typename T>
@@ -466,26 +524,27 @@ void gemm_bits(torch::Tensor const& x, torch::Tensor const& qweight,
   }
 }
 
-template <int R, int M, int E, int B, typename T>
-void launch_moe(const T* x, const uint32_t* qw, const float* sc,
+template <int R, int M, int E, typename F, typename T>
+void launch_moe(const T* x, const uint32_t* qw, const typename F::Scale* sc,
                 const float* zr, T* y, const int* experts, const int* slots,
                 const int* padded, int blocks, int S, int div, int N, int K,
                 int G, cudaStream_t stream) {
   const dim3 block(kWarp, kWarps),
       grid((N + R * kWarps - 1) / (R * kWarps), blocks);
-  moe_gemm_kernel<R, M, E, B, T><<<grid, block, 0, stream>>>(
+  moe_gemm_kernel<R, M, E, F, T><<<grid, block, 0, stream>>>(
       x, qw, sc, zr, y, experts, slots, padded, S, div, N, K, G, K / G);
 }
 
 // Pair mode: one slot per block row, with the 1-row choice of gemm_rows.
 // Block mode: kMoeBlock slots per block row, as gemm_rows does for 8 rows.
-template <int B, typename T>
+template <typename F, typename T>
 void moe_rows(bool pairs, int emax, const T* x, const uint32_t* qw,
-              const float* sc, const float* zr, T* y, const int* experts,
-              const int* slots, const int* padded, int blocks, int S, int div,
-              int N, int K, int G, cudaStream_t s) {
+              const typename F::Scale* sc, const float* zr, T* y,
+              const int* experts, const int* slots, const int* padded,
+              int blocks, int S, int div, int N, int K, int G,
+              cudaStream_t s) {
 #define K80_MOE(R, M, E)                                                     \
-  return launch_moe<R, M, E, B, T>(x, qw, sc, zr, y, experts, slots, padded, \
+  return launch_moe<R, M, E, F, T>(x, qw, sc, zr, y, experts, slots, padded, \
                                    blocks, S, div, N, K, G, s)
   if (pairs) {
     if (emax == 32) K80_MOE(4, 1, 32);
@@ -511,15 +570,88 @@ void moe_bits(torch::Tensor const& x, torch::Tensor const& qweight,
   const auto* qw = reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>());
   const bool pairs = slots == nullptr;
   if (x.scalar_type() == at::kFloat)
-    moe_rows<B, float>(pairs, emax, x.data_ptr<float>(), qw,
-                       scales.data_ptr<float>(), zeros.data_ptr<float>(),
-                       y.data_ptr<float>(), experts.data_ptr<int>(), slots,
-                       padded, blocks, S, div, N, K, G, stream);
+    moe_rows<Int<B>, float>(pairs, emax, x.data_ptr<float>(), qw,
+                            scales.data_ptr<float>(), zeros.data_ptr<float>(),
+                            y.data_ptr<float>(), experts.data_ptr<int>(),
+                            slots, padded, blocks, S, div, N, K, G, stream);
   else
-    moe_rows<B, c10::Half>(pairs, emax, x.data_ptr<c10::Half>(), qw,
-                           scales.data_ptr<float>(), zeros.data_ptr<float>(),
-                           y.data_ptr<c10::Half>(), experts.data_ptr<int>(),
-                           slots, padded, blocks, S, div, N, K, G, stream);
+    moe_rows<Int<B>, c10::Half>(
+        pairs, emax, x.data_ptr<c10::Half>(), qw, scales.data_ptr<float>(),
+        zeros.data_ptr<float>(), y.data_ptr<c10::Half>(),
+        experts.data_ptr<int>(), slots, padded, blocks, S, div, N, K, G,
+        stream);
+}
+
+// The same for MXFP4 weights: groups of 32, so E = 32 in pair mode.
+void moe_mxfp4(torch::Tensor const& x, torch::Tensor const& qweight,
+               torch::Tensor const& scales, torch::Tensor const& experts,
+               const int* slots, const int* padded, int blocks, int S, int div,
+               torch::Tensor& y) {
+  const int N = qweight.size(1), K = x.size(1), G = scales.size(2);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const auto* qw = reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>());
+  const auto* sc = scales.data_ptr<uint8_t>();
+  const bool pairs = slots == nullptr;
+  if (x.scalar_type() == at::kFloat)
+    moe_rows<Mxfp4, float>(pairs, 32, x.data_ptr<float>(), qw, sc, nullptr,
+                           y.data_ptr<float>(), experts.data_ptr<int>(), slots,
+                           padded, blocks, S, div, N, K, G, stream);
+  else
+    moe_rows<Mxfp4, c10::Half>(pairs, 32, x.data_ptr<c10::Half>(), qw, sc,
+                               nullptr, y.data_ptr<c10::Half>(),
+                               experts.data_ptr<int>(), slots, padded, blocks,
+                               S, div, N, K, G, stream);
+}
+
+// Checks x, expert_ids, slots and padded for an MoE product over K inputs,
+// and returns the block rows, with the slot and padded pointers of block
+// mode (null in pair mode).
+int moe_slots(const char* op, torch::Tensor const& x,
+              torch::Tensor const& qweight, int64_t K,
+              torch::Tensor const& expert_ids,
+              std::optional<torch::Tensor> const& slots,
+              std::optional<torch::Tensor> const& padded, int64_t num_slots,
+              int64_t rows_per_input, const int** slot_ptr,
+              const int** padded_ptr) {
+  TORCH_CHECK(x.dim() == 2 && x.size(1) == K && x.is_contiguous() &&
+                  x.device() == qweight.device(),
+              op, ": x must be contiguous [M, K] on the weight's device");
+  TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf,
+              op, ": x must be float32 or float16");
+  TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, op,
+              ": x must be 16-byte aligned");
+  TORCH_CHECK(rows_per_input >= 1 && x.size(0) * rows_per_input >= num_slots,
+              op, ": x has fewer rows than the slots read");
+  TORCH_CHECK(expert_ids.dim() == 1 && expert_ids.is_contiguous() &&
+                  expert_ids.scalar_type() == at::kInt &&
+                  expert_ids.device() == qweight.device(),
+              op, ": expert_ids must be contiguous int32");
+  TORCH_CHECK(qweight.size(1) <= INT32_MAX && K <= INT32_MAX &&
+                  num_slots <= INT32_MAX,
+              op, ": too large");
+  int blocks;
+  *slot_ptr = nullptr;
+  *padded_ptr = nullptr;
+  if (slots.has_value()) {
+    TORCH_CHECK(padded.has_value(), op, ": block mode needs padded");
+    TORCH_CHECK(slots->dim() == 1 && slots->is_contiguous() &&
+                    slots->scalar_type() == at::kInt &&
+                    slots->numel() % kMoeBlock == 0,
+                op, ": slots must be contiguous int32, a multiple of 8 long");
+    TORCH_CHECK(padded->numel() >= 1 && padded->scalar_type() == at::kInt, op,
+                ": padded must be int32");
+    blocks = slots->numel() / kMoeBlock;
+    TORCH_CHECK(expert_ids.numel() >= blocks, op,
+                ": one expert id per block of 8 slots");
+    *slot_ptr = slots->data_ptr<int>();
+    *padded_ptr = padded->data_ptr<int>();
+  } else {
+    TORCH_CHECK(expert_ids.numel() == num_slots, op,
+                ": one expert id per slot");
+    blocks = num_slots;
+  }
+  TORCH_CHECK(blocks <= 65535, op, ": more than 65535 block rows");
+  return blocks;
 }
 
 // y[s] = x[s / div] W[experts[s]]^T for FP32 or FP16 weights [E, N, K], one
@@ -660,48 +792,11 @@ torch::Tensor k80_int4_moe_gemm(torch::Tensor const& x,
   TORCH_CHECK(G > 0 && K % G == 0 && (K / G) % 8 == 0,
               "k80_int4_moe_gemm: the group size must divide K and be a "
               "multiple of 8");
-  TORCH_CHECK(x.dim() == 2 && x.size(1) == K && x.is_contiguous() &&
-                  x.device() == qweight.device(),
-              "k80_int4_moe_gemm: x must be contiguous [M, K] on the weight's "
-              "device");
-  TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf,
-              "k80_int4_moe_gemm: x must be float32 or float16");
-  TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0,
-              "k80_int4_moe_gemm: x must be 16-byte aligned");
-  TORCH_CHECK(rows_per_input >= 1 &&
-                  x.size(0) * rows_per_input >= num_slots,
-              "k80_int4_moe_gemm: x has fewer rows than the slots read");
-  TORCH_CHECK(expert_ids.dim() == 1 && expert_ids.is_contiguous() &&
-                  expert_ids.scalar_type() == at::kInt &&
-                  expert_ids.device() == qweight.device(),
-              "k80_int4_moe_gemm: expert_ids must be contiguous int32");
-  TORCH_CHECK(qweight.size(1) <= INT32_MAX && K <= INT32_MAX &&
-                  num_slots <= INT32_MAX,
-              "k80_int4_moe_gemm: too large");
-  int blocks;
-  const int* slot_ptr = nullptr;
-  const int* padded_ptr = nullptr;
-  if (slots.has_value()) {
-    TORCH_CHECK(padded.has_value(),
-                "k80_int4_moe_gemm: block mode needs padded");
-    TORCH_CHECK(slots->dim() == 1 && slots->is_contiguous() &&
-                    slots->scalar_type() == at::kInt &&
-                    slots->numel() % kMoeBlock == 0,
-                "k80_int4_moe_gemm: slots must be contiguous int32, a "
-                "multiple of 8 long");
-    TORCH_CHECK(padded->numel() >= 1 && padded->scalar_type() == at::kInt,
-                "k80_int4_moe_gemm: padded must be int32");
-    blocks = slots->numel() / kMoeBlock;
-    TORCH_CHECK(expert_ids.numel() >= blocks,
-                "k80_int4_moe_gemm: one expert id per block of 8 slots");
-    slot_ptr = slots->data_ptr<int>();
-    padded_ptr = padded->data_ptr<int>();
-  } else {
-    TORCH_CHECK(expert_ids.numel() == num_slots,
-                "k80_int4_moe_gemm: one expert id per slot");
-    blocks = num_slots;
-  }
-  TORCH_CHECK(blocks <= 65535, "k80_int4_moe_gemm: more than 65535 block rows");
+  const int* slot_ptr;
+  const int* padded_ptr;
+  const int blocks = moe_slots("k80_int4_moe_gemm", x, qweight, K, expert_ids,
+                               slots, padded, num_slots, rows_per_input,
+                               &slot_ptr, &padded_ptr);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto y = torch::empty({num_slots, qweight.size(1)}, x.options());
   if (num_slots == 0 || blocks == 0) return y;
@@ -711,6 +806,43 @@ torch::Tensor k80_int4_moe_gemm(torch::Tensor const& x,
   else
     moe_bits<8>(x, qweight, scales, zeros, expert_ids, slot_ptr, padded_ptr,
                 blocks, num_slots, rows_per_input, y);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return y;
+}
+
+// k80_int4_moe_gemm for MXFP4 experts (#128): qweight int32 [E, N, K / 8],
+// the E2M1 codes as gpt-oss stores them, and scales uint8 [E, N, K / 32],
+// their E8M0 exponents.
+torch::Tensor k80_mxfp4_moe_gemm(torch::Tensor const& x,
+                                 torch::Tensor const& qweight,
+                                 torch::Tensor const& scales,
+                                 torch::Tensor const& expert_ids,
+                                 std::optional<torch::Tensor> const& slots,
+                                 std::optional<torch::Tensor> const& padded,
+                                 int64_t num_slots, int64_t rows_per_input) {
+  using namespace k80_int4;
+  TORCH_CHECK(qweight.is_cuda() && qweight.dim() == 3 &&
+                  qweight.is_contiguous() && qweight.scalar_type() == at::kInt,
+              "k80_mxfp4_moe_gemm: qweight must be contiguous int32 "
+              "[E, N, K / 8]");
+  const int64_t K = qweight.size(2) * 8;
+  TORCH_CHECK(scales.dim() == 3 && scales.is_contiguous() &&
+                  scales.scalar_type() == at::kByte &&
+                  scales.size(0) == qweight.size(0) &&
+                  scales.size(1) == qweight.size(1) &&
+                  scales.size(2) * 32 == K,
+              "k80_mxfp4_moe_gemm: scales must be contiguous uint8 "
+              "[E, N, K / 32]");
+  const int* slot_ptr;
+  const int* padded_ptr;
+  const int blocks = moe_slots("k80_mxfp4_moe_gemm", x, qweight, K,
+                               expert_ids, slots, padded, num_slots,
+                               rows_per_input, &slot_ptr, &padded_ptr);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  auto y = torch::empty({num_slots, qweight.size(1)}, x.options());
+  if (num_slots == 0 || blocks == 0) return y;
+  moe_mxfp4(x, qweight, scales, expert_ids, slot_ptr, padded_ptr, blocks,
+            num_slots, rows_per_input, y);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return y;
 }

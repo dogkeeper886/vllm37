@@ -747,7 +747,12 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4":
+        # K80 fork (#128): Kepler's MXFP4 experts (K80Mxfp4MoEMethod) need
+        # neither torch 2.8 nor Triton, and no padding.
+        from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
+            on_kepler)
+        if (quant_config and quant_config.get_name() == "mxfp4"
+                and not on_kepler()):
             if not is_torch_equal_or_newer("2.8.0"):
                 raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
             if current_platform.is_device_capability(
