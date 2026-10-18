@@ -4035,6 +4035,19 @@ class VllmConfig:
                     "Only \"last\" pooling supports chunked "
                     "prefill and prefix caching; disabling both.")
 
+        # K80 fork (#123): on V0, chunked prefill and prefix-cache hits run
+        # PagedAttention.forward_prefix, whose kernel (context_attention_fwd)
+        # is Triton; without Triton (Kepler) every such request failed with
+        # a NameError.
+        from vllm.triton_utils import HAS_TRITON
+        if (not envs.VLLM_USE_V1 and not HAS_TRITON
+                and (self.scheduler_config.chunked_prefill_enabled or
+                     (self.cache_config is not None
+                      and self.cache_config.enable_prefix_caching))):
+            disable_chunked_prefill_reasons.append(
+                "Chunked prefill and prefix caching need Triton on the V0 "
+                "engine, and Triton is not available; disabling both.")
+
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
