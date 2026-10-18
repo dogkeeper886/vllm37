@@ -17,6 +17,12 @@
 #       unquantized layer
 # A fused layer (QKV, gate-up) whose shards have different types runs as one
 # piece per run of shards that share a path.
+# MoE experts (#131) run on the K80 MoE kernels (k80_moe_experts), each
+# expert's blocks repacked exactly:
+#   Q4_0, Q4_1, Q4_K          int4, a scale and zero per 32 weights
+#   Q8_0, Q5_0, Q5_1, Q5_K    int8, a scale and zero per 32 weights
+#   Q6_K                      int8, a scale and zero per 16 weights
+# and any other type dequantized to the model dtype (k80_fused_experts).
 
 from typing import Optional
 
@@ -27,7 +33,8 @@ from gguf import GGMLQuantizationType as WeightType
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.gguf import (GGUFConfig,
-                                                         GGUFLinearMethod)
+                                                         GGUFLinearMethod,
+                                                         GGUFMoEMethod)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.k80 import (  # noqa: E501
     k80_int4_matmul, k80_int4_ops, k80_int4_rows)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -37,6 +44,8 @@ logger = init_logger(__name__)
 K80_GGUF_INT4_TYPES = (WeightType.Q4_0, WeightType.Q4_1, WeightType.Q4_K)
 K80_GGUF_INT8_TYPES = (WeightType.Q8_0, )
 K80_GGUF_GROUP_SIZE = 32
+K80_GGUF_MOE_INT8_TYPES = (WeightType.Q8_0, WeightType.Q5_0, WeightType.Q5_1,
+                           WeightType.Q5_K, WeightType.Q6_K)
 # Read as stored by the K80 GGUF kernels.
 K80_GGUF_NATIVE_TYPES = (WeightType.Q4_K, WeightType.Q6_K)
 # Above this many rows dequantize + FP32 GEMM beats k80_gguf_gemm: on a K80
@@ -116,6 +125,66 @@ def _decode_q4(raw: torch.Tensor, qtype: int):
     return _affine(q, d, m)
 
 
+def _bits(t: torch.Tensor, n: int, step: int = 1) -> torch.Tensor:
+    """[..., B] -> [..., n, B]: field i of each element is bits
+    step*i .. step*i + step - 1."""
+    shifts = torch.arange(0, n * step, step, device=t.device, dtype=t.dtype)
+    return (t.unsqueeze(-2) >> shifts.view(n, 1)) & ((1 << step) - 1)
+
+
+def _decode_q8(raw: torch.Tensor, qtype: int):
+    """GGUF Q8_0 / Q5_0 / Q5_1 / Q5_K / Q6_K rows [R, bytes] -> byte values
+    uint8 [R, G, K / G], fp32 scales and zeros [R, G] with w = (q - zero) *
+    scale: groups of 32, or 16 for Q6_K. Follows the gguf package's
+    dequantize_blocks for each type."""
+    rows = raw.shape[0]
+    if qtype == WeightType.Q8_0:  # d, 32 int8: w = d * q
+        blk = raw.view(rows, -1, 34)
+        scale = _f16(blk[..., 0:2])
+        return blk[..., 2:] ^ 0x80, scale, torch.full_like(scale, 128.0)
+    if qtype in (WeightType.Q5_0, WeightType.Q5_1):
+        # Q5_0: d, qh, 16 bytes: w = (q - 16) * d. Q5_1: d, m, qh, 16 bytes:
+        # w = q * d + m. Bit i of the 32-bit qh is the fifth bit of value i.
+        lead = 2 if qtype == WeightType.Q5_0 else 4
+        blk = raw.view(rows, -1, lead + 20)
+        qh = blk[..., lead:lead + 4].contiguous().view(torch.int32)
+        hi = _bits(qh, 32).squeeze(-1).to(torch.uint8)
+        qs = blk[..., lead + 4:]
+        q = torch.cat((qs & 15, qs >> 4), dim=-1) | (hi << 4)
+        d = _f16(blk[..., 0:2])
+        if qtype == WeightType.Q5_0:
+            return q, d, torch.full_like(d, 16.0)
+        return _affine(q, d, -_f16(blk[..., 2:4]))
+    if qtype == WeightType.Q5_K:
+        # d, dmin, 12 bytes of scales and mins (as Q4_K), 32 bytes of fifth
+        # bits (bit j of byte l: sub-block j, value l), 128 bytes of nibbles
+        # (as Q4_K). w = d * sc * q - dmin * m.
+        blk = raw.view(rows, -1, 176)
+        nb = blk.shape[1]
+        s = blk[..., 4:16].int()
+        lo, mid, hi = s[..., 0:4], s[..., 4:8], s[..., 8:12]
+        sc = torch.cat((lo & 63, (hi & 15) | ((lo >> 6) << 4)), dim=-1)
+        mn = torch.cat((mid & 63, (hi >> 4) | ((mid >> 6) << 4)), dim=-1)
+        qs = blk[..., 48:].reshape(rows, nb, 4, 32)
+        q = torch.stack((qs & 15, qs >> 4), dim=3).reshape(rows, nb * 8, 32)
+        q = q | (_bits(blk[..., 16:48], 8).reshape(rows, nb * 8, 32) << 4)
+        d = (_f16(blk[..., 0:2]).unsqueeze(-1) * sc).reshape(rows, nb * 8)
+        m = (_f16(blk[..., 2:4]).unsqueeze(-1) * mn).reshape(rows, nb * 8)
+        return _affine(q, d, m)
+    assert qtype == WeightType.Q6_K
+    # 128 bytes of low nibbles, 64 bytes of high 2-bit pairs, 16 int8
+    # scales, d. w = d * sc * (q - 32), one scale per 16 values.
+    blk = raw.view(rows, -1, 210)
+    nb = blk.shape[1]
+    ql = blk[..., :128].reshape(rows, nb, 2, 1, 64)
+    ql = torch.cat((ql & 15, ql >> 4), dim=3).reshape(rows, nb * 8, 32)
+    qh = _bits(blk[..., 128:192].reshape(rows, nb, 2, 32), 4, 2)
+    q = (ql | (qh.reshape(rows, nb * 8, 32) << 4)).reshape(rows, nb * 16, 16)
+    sc = blk[..., 192:208].contiguous().view(torch.int8).float()
+    scale = (_f16(blk[..., 208:210]).unsqueeze(-1) * sc).reshape(rows, nb * 16)
+    return q, scale, torch.full_like(scale, 32.0)
+
+
 def _pack(q: torch.Tensor) -> torch.Tensor:
     """uint8 values [R, K] -> int32 [R, K / 8], value i of a word in bits
     4i..4i + 3 (the K80 int4 layout)."""
@@ -155,6 +224,14 @@ def k80_gguf_int8(raw: torch.Tensor, qtype: int):
     scales = torch.cat(scales).contiguous()
     return (torch.cat(qweight).contiguous(), scales,
             torch.full_like(scales, 128.0))
+
+
+def k80_gguf_moe_int8(raw: torch.Tensor, qtype: int):
+    """A GGUF tensor [N, bytes] of a K80_GGUF_MOE_INT8_TYPES type in the K80
+    int8 layout: qweight int32 [N, K / 4], scales and zeros fp32 [N, G]."""
+    q, s, z = _decode_q8(raw, qtype)
+    return (q.reshape(q.shape[0], -1).contiguous().view(torch.int32),
+            s.contiguous(), z.contiguous())
 
 
 def k80_gguf_dense(raw: torch.Tensor, qtype: int,
@@ -281,6 +358,98 @@ class K80GGUFEmbeddingMethod(K80GGUFLinearMethod):
         return out.view(*x.shape, out.shape[-1])
 
 
+def _moe_bits(qtype: int) -> Optional[int]:
+    if qtype in K80_GGUF_INT4_TYPES:
+        return 4
+    return 8 if qtype in K80_GGUF_MOE_INT8_TYPES else None
+
+
+class K80GGUFMoEMethod(GGUFMoEMethod):
+    """GGUF MoE experts on Kepler (#131): w13 and w2 repacked into the K80
+    int4 / int8 MoE layout (k80_moe_load's parameters), or both dequantized
+    when either has another type."""
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        self.params_dtype = params_dtype
+        super().create_weights(layer, num_experts, hidden_size,
+                               intermediate_size_per_partition, params_dtype,
+                               **extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        device = layer.w13_qweight_type.device
+        stacks = {}
+        for name in ("w13", "w2"):
+            raw = getattr(layer, f"{name}_qweight").data.to(device)
+            qtype = getattr(layer, f"{name}_qweight_type").weight_type
+            block, size = gguf.GGML_QUANT_SIZES[WeightType(qtype)]
+            if raw.shape[-1] % size:  # a die's share cut a block
+                raise ValueError(
+                    f"K80 GGUF MoE: {name} rows of {raw.shape[-1]} bytes are "
+                    f"not whole {WeightType(qtype).name} blocks of {block} "
+                    "weights; use fewer dies (tensor_parallel_size), #132")
+            stacks[name] = (raw, qtype)
+            delattr(layer, f"{name}_qweight")
+        self.dense = any(
+            _moe_bits(qtype) is None for _, qtype in stacks.values())
+        for name, (raw, qtype) in stacks.items():
+            if self.dense:
+                w = torch.stack([
+                    k80_gguf_dense(raw[e], qtype, self.params_dtype)
+                    for e in range(raw.shape[0])
+                ])
+                layer.register_parameter(
+                    f"k80_{name}_weight",
+                    torch.nn.Parameter(w, requires_grad=False))
+                continue
+            bits = _moe_bits(qtype)
+            repack = k80_gguf_int4 if bits == 4 else k80_gguf_moe_int8
+            parts = [repack(raw[e], qtype) for e in range(raw.shape[0])]
+            for i, kind in enumerate(("qweight", "scales", "zeros")):
+                t = torch.stack([p[i] for p in parts])
+                layer.register_parameter(
+                    f"k80_{name}_{kind}",
+                    torch.nn.Parameter(t, requires_grad=False))
+            setattr(layer, "k80_bits" if name == "w13" else "k80_w2_bits",
+                    bits)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
+              router_logits: torch.Tensor, top_k: int, renormalize: bool,
+              **kwargs) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.k80_moe import (
+            k80_fused_experts, k80_moe_apply)
+        if not self.dense:
+            return k80_moe_apply(layer, x, router_logits, top_k, renormalize,
+                                 **kwargs)
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        if kwargs.get("enable_eplb"):
+            raise NotImplementedError(
+                "K80 MoE experts: no expert load balancing")
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=kwargs.get("use_grouped_topk", False),
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=kwargs.get("topk_group"),
+            num_expert_group=kwargs.get("num_expert_group"),
+            custom_routing_function=kwargs.get("custom_routing_function"),
+            scoring_func=kwargs.get("scoring_func", "softmax"),
+            e_score_correction_bias=kwargs.get("e_score_correction_bias"))
+        return k80_fused_experts(
+            x,
+            layer.k80_w13_weight,
+            layer.k80_w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=kwargs.get("activation", "silu"),
+            apply_router_weight_on_input=kwargs.get(
+                "apply_router_weight_on_input", False),
+            global_num_experts=kwargs.get("global_num_experts", -1),
+            expert_map=kwargs.get("expert_map"))
+
+
 def k80_gguf_quant_method(config: GGUFConfig, layer: torch.nn.Module):
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.linear import LinearBase
@@ -291,5 +460,5 @@ def k80_gguf_quant_method(config: GGUFConfig, layer: torch.nn.Module):
     if isinstance(layer, VocabParallelEmbedding):
         return K80GGUFEmbeddingMethod(config)
     if isinstance(layer, FusedMoE):
-        raise ValueError("GGUF MoE layers are not supported on Kepler (K80)")
+        return K80GGUFMoEMethod(config)
     return None
