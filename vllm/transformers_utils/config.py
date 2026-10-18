@@ -303,6 +303,30 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+def _k80_gguf_moe_config(config: PretrainedConfig, gguf_path: Path) -> None:
+    """K80 fork (#131): transformers (4.57) renames a qwen2moe / qwen3moe
+    GGUF's architecture to qwen2_moe / qwen3_moe before it looks the keys up
+    in its config mapping, which is keyed by the GGUF name, so it reads none
+    of them and the config keeps the class defaults (rope_theta 10000 for
+    Qwen1.5-MoE, whose GGUF stores 1e6: replies turn to noise past a few
+    thousand tokens). Set those fields from the GGUF metadata."""
+    import gguf
+    from transformers.integrations.ggml import GGUF_CONFIG_MAPPING
+    if not gguf_path.is_file():
+        return
+    reader = gguf.GGUFReader(gguf_path)
+    field = reader.fields.get("general.architecture")
+    arch = bytes(field.parts[field.data[0]]).decode() if field else None
+    if arch not in ("qwen2moe", "qwen3moe"):
+        return
+    for key, hf_key in GGUF_CONFIG_MAPPING[arch].items():
+        field = reader.fields.get(f"{arch}.{key}")
+        if field is None or hf_key in (None, -1):
+            continue
+        value = field.parts[field.data[0]].tolist()
+        setattr(config, hf_key, value[0] if len(value) == 1 else value)
+
+
 def maybe_override_with_speculators_target_model(
     model: str,
     tokenizer: str,
@@ -434,6 +458,8 @@ def get_config(
                 else:
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
+        if is_gguf:
+            _k80_gguf_moe_config(config, Path(model) / kwargs["gguf_file"])
 
         # Phi4Flash misuses this config as list[int]. Convert it to int and add
         # the layer_types list[str] to make it HF compatible

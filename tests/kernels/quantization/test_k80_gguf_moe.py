@@ -106,13 +106,14 @@ PAIRS = [(WeightType.Q4_0, WeightType.Q4_0), (WeightType.Q4_K, WeightType.Q6_K),
 
 
 @pytest.mark.parametrize("pair", range(len(PAIRS)))
-def test_gguf_moe_experts(pair):
+@pytest.mark.parametrize("tokens", [37, 300])  # pair mode, block mode
+def test_gguf_moe_experts(pair, tokens):
     from vllm.model_executor.layers.fused_moe.k80_moe import (
         k80_fused_experts, k80_moe_experts)
     from vllm.model_executor.layers.quantization.k80_gguf import (
         K80GGUFMoEMethod)
     w13_type, w2_type = PAIRS[pair]
-    e, hidden, inter, tokens, topk = 8, 512, 256, 37, 2
+    e, hidden, inter, topk = 8, 512, 256, 2
     w13 = np.stack([blocks(w13_type, 2 * inter, hidden, seed=i)
                     for i in range(e)])
     w2 = np.stack([blocks(w2_type, hidden, inter, seed=100 + i)
