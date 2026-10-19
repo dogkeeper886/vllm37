@@ -71,17 +71,22 @@ class Qwen2MoeMLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
+        prefix: str = "",
     ) -> None:
         super().__init__()
+        # K80 fork (#127): the prefix lets a checkpoint's per-module rules
+        # (GPTQ dynamic, modules_to_not_convert) reach the shared expert.
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config,
-                                           reduce_results=reduce_results)
+                                           reduce_results=reduce_results,
+                                           prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -131,6 +136,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 reduce_results=self.experts.must_reduce_shared_expert_outputs(
                 ),
+                prefix=f"{prefix}.shared_expert",
             )
         else:
             self.shared_expert = None

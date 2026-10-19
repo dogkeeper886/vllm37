@@ -385,6 +385,12 @@ def resolve_mistral_chat_template(
     return None
 
 
+# K80 fork (#127): models whose AutoProcessor failed to load. lru_cache keeps
+# no failure, so every chat request retried the load: about 4 s, twice per
+# request, for Qwen3.5, whose video processor needs torchvision.
+_NO_PROCESSOR: set[str] = set()
+
+
 def resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
@@ -397,7 +403,7 @@ def resolve_hf_chat_template(
         return chat_template
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
-    if tools is None:
+    if tools is None and tokenizer.name_or_path not in _NO_PROCESSOR:
         try:
             processor = cached_get_processor(
                 tokenizer.name_or_path,
@@ -410,6 +416,7 @@ def resolve_hf_chat_template(
                 processor.chat_template is not None:
                 return processor.chat_template
         except Exception:
+            _NO_PROCESSOR.add(tokenizer.name_or_path)
             logger.debug("Failed to load AutoProcessor chat template for %s", tokenizer.name_or_path, exc_info=True)  # noqa: E501
 
     # 3rd priority: AutoTokenizer chat template

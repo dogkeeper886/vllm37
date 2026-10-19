@@ -1,0 +1,10 @@
+# Qwen/Qwen3.5-0.8B from its official BF16 weights, text only (#127): 18
+# Gated DeltaNet layers and 6 full-attention layers on one die, float32.
+# Each sequence holds about 18 MiB of recurrent state, so max-num-seqs bounds
+# that cache.
+# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+model: Qwen/Qwen3.5-0.8B
+dtype: float32
+tensor-parallel-size: 1
+max-model-len: 8192
+max-num-seqs: 16
