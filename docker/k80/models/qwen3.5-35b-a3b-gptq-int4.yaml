@@ -1,0 +1,11 @@
+# Qwen/Qwen3.5-35B-A3B-GPTQ-Int4, Qwen's own int4 group-128 build, text only
+# (#127): 256 experts (top 8) in int4 on the K80 MoE kernels; attention,
+# Gated DeltaNet and the shared expert stay unquantized (upcast to float32).
+# TP=4 on all four dies, about 6.6 GiB of weights each; each die's share of
+# an expert (128 of 512 features) is one GPTQ group.
+# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+model: Qwen/Qwen3.5-35B-A3B-GPTQ-Int4
+dtype: float32
+tensor-parallel-size: 4
+max-model-len: 8192
+max-num-seqs: 16

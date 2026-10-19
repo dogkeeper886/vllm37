@@ -22,6 +22,10 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.gemma4 import (Gemma4Config,
                                                    Gemma4TextConfig)
+from vllm.transformers_utils.configs.qwen3_5 import (Qwen3_5Config,
+                                                    Qwen3_5MoeConfig,
+                                                    Qwen3_5MoeTextConfig,
+                                                    Qwen3_5TextConfig)
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
@@ -47,6 +51,10 @@ __all__ = [
     "NemotronConfig",
     "Gemma4Config",
     "Gemma4TextConfig",
+    "Qwen3_5Config",
+    "Qwen3_5TextConfig",
+    "Qwen3_5MoeConfig",
+    "Qwen3_5MoeTextConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
     "NVLM_D_Config",

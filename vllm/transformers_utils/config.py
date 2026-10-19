@@ -31,6 +31,9 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              Gemma4Config, Gemma4TextConfig,
+                                             Qwen3_5Config, Qwen3_5MoeConfig,
+                                             Qwen3_5MoeTextConfig,
+                                             Qwen3_5TextConfig,
                                              EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
@@ -88,6 +91,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "nemotron": NemotronConfig,
     "gemma4": Gemma4Config,  # K80 fork (#126)
     "gemma4_text": Gemma4TextConfig,
+    "qwen3_5": Qwen3_5Config,  # K80 fork (#127)
+    "qwen3_5_text": Qwen3_5TextConfig,
+    "qwen3_5_moe": Qwen3_5MoeConfig,
+    "qwen3_5_moe_text": Qwen3_5MoeTextConfig,
     "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
