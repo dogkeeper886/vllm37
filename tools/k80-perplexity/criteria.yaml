@@ -1,0 +1,18 @@
+# The gate (perplexity.py gate) and the ranking (perplexity.py rank), #152.
+
+# A measure result of an unquantized model, relative to this file: the gate
+# compares each checkpoint with it. Qwen3.5-0.8B in FP32 on one die (#152).
+calibration: calibration/qwen3.5-0.8b.json
+
+# A checkpoint's prefill/decode gap may be this many times the calibration's.
+decode_gap_factor: 10
+
+# The copied text's second copy scores below this.
+copy_max: 1.5
+
+# The shuffled text scores over this many times the text.
+shuffle_min_ratio: 10
+
+# Two checkpoints of one model tie when their perplexities differ by less than
+# this fraction. The calibration at TP=1 and TP=2 differed by 1.7e-7.
+tie: 1.0e-6
