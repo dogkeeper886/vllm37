@@ -75,6 +75,7 @@ const median = (xs: number[]): number => {
 
 export interface Dies {
   rule: DieRule;
+  ready(): Promise<void>;
   hot(): boolean;
   now(): Record<number, number>;
   state(from: number, to: number, gate: Gate): DieState;
@@ -102,6 +103,10 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
 
   return {
     rule,
+
+    async ready(): Promise<void> {
+      while (!failure && rule.dies.some((d) => !latest.has(d))) await new Promise((r) => setTimeout(r, 100));
+    },
 
     hot(): boolean {
       return rule.dies.some((d) => (latest.get(d)?.c ?? -Infinity) > rule.startC);

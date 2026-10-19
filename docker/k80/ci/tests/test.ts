@@ -91,6 +91,7 @@ async function restart(): Promise<void> {
 let fresh = true;
 
 async function timed(option: string, name: string, opts?: GenerateOptions): Promise<Result[]> {
+  await dies.ready();
   let waitedS = 0;
   if (fresh) {
     waitedS = cooledS();
