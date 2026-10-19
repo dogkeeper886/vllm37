@@ -73,6 +73,10 @@ _TEXT_GENERATION_MODELS = {
     # K80 fork (#126): Gemma 4, text only
     "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Gemma4ForConditionalGeneration": ("gemma4", "Gemma4ForCausalLM"),
+    # K80 fork (#130): Muse-Glimmer, text only, from its GGUF
+    "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
+    "MuseGlimmerForConditionalGeneration": ("muse_glimmer",
+                                            "MuseGlimmerForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),

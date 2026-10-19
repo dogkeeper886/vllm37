@@ -63,6 +63,11 @@ class GGUFModelLoader(BaseModelLoader):
             from vllm.model_executor.models.gemma4 import (
                 gemma4_gguf_name_map)
             return gemma4_gguf_name_map(config)
+        if model_type == "muse_glimmer":
+            # K80 fork (#130): likewise for Muse-Glimmer.
+            from vllm.model_executor.models.muse_glimmer import (
+                muse_glimmer_gguf_name_map)
+            return muse_glimmer_gguf_name_map(config)
         gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
