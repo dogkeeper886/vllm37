@@ -93,10 +93,16 @@ runs:
         CALLS: ${{ inputs.calls }}
         STAGGER: ${{ inputs.stagger }}
         DIES: ${{ inputs.dies }}
-      # Each option waits for its dies to cool and records their clocks and
-      # temperatures (lib/dies.ts); empty temperatures take test.ts's defaults.
-      # VLLM37_DIES, from service-start.sh, counts every die the server took.
+        # docker or local; empty = docker
+        SERVER: ${{ inputs.server }}
+        PROFILE: ${{ inputs.profile }}
+        MODEL: ${{ !inputs.profile && inputs.model || '' }}
+        DTYPE: ${{ !inputs.profile && inputs.dtype || '' }}
+        TP_SIZE: ${{ !inputs.profile && inputs.dies || '' }}
+        MAX_MODEL_LEN: ${{ !inputs.profile && inputs.max_model_len || '' }}
+      # TEST_START_TEMP: whole °C from 1, below TEST_STOP_TEMP; empty = 60.
+      # TEST_STOP_TEMP: whole °C above TEST_START_TEMP; empty = 80.
       run: >-
         npx tsx test.ts --test "$TEST" --prompt "$PROMPT" --calls "$CALLS" --stagger "$STAGGER"
         --dies "${VLLM37_DIES:-$DIES}" --start-temp "${TEST_START_TEMP:-}" --stop-temp "${TEST_STOP_TEMP:-}"
-        --output results/replies.json
+        --server "${SERVER:-docker}" --output results/replies.json
