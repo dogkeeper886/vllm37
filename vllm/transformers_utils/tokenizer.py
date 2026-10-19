@@ -261,6 +261,20 @@ def get_tokenizer(
                         **kwargs, "extra_special_tokens": {}
                     },
                 )
+            except ValueError as e:
+                # K80 fork (#130): transformers 5 names its tokenizer.json
+                # tokenizer TokenizersBackend (Muse-Glimmer); in this
+                # transformers (4.57) that is PreTrainedTokenizerFast.
+                if "TokenizersBackend" not in str(e):
+                    raise
+                tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                    tokenizer_name,
+                    *args,
+                    revision=revision,
+                    **{
+                        **kwargs, "extra_special_tokens": {}
+                    },
+                )
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,

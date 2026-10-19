@@ -26,6 +26,8 @@ from vllm.transformers_utils.configs.qwen3_5 import (Qwen3_5Config,
                                                     Qwen3_5MoeConfig,
                                                     Qwen3_5MoeTextConfig,
                                                     Qwen3_5TextConfig)
+from vllm.transformers_utils.configs.muse_glimmer import (
+    MuseGlimmerConfig, MuseGlimmerTextConfig)
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
@@ -55,6 +57,8 @@ __all__ = [
     "Qwen3_5TextConfig",
     "Qwen3_5MoeConfig",
     "Qwen3_5MoeTextConfig",
+    "MuseGlimmerConfig",
+    "MuseGlimmerTextConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
     "NVLM_D_Config",
