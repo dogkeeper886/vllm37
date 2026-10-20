@@ -129,7 +129,6 @@ cd "${WORK_DIR}/xformers"
 export TORCH_CUDA_ARCH_LIST="${TARGET_ARCH_LIST}"
 export MAX_JOBS
 export FORCE_CUDA=1
-export XFORMERS_DISABLE_TRITON=1
 
 pip install -v --no-build-isolation . 2>&1
 
