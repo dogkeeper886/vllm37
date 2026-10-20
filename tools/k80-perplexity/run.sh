@@ -2,7 +2,7 @@
 # Usage: run.sh <profile> [OPTION...]
 #   profile  a profile name in docker/k80/models/ or a path
 #   OPTION   perplexity.py measure's --text, --windows, --window-tokens,
-#            --decode-prompt, --decode-tokens or --seed
+#            --decode-prompts, --decode-prompt, --decode-tokens or --seed
 # Env:
 #   PORT                  a TCP port (default 8011)
 #   CUDA_VISIBLE_DEVICES  comma-separated die indexes, the profile's tensor x

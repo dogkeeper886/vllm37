@@ -29,7 +29,7 @@ The text is tokenized once and cut into 32 windows of 256 tokens. Each window go
 | `repeatGap` | window 1 scored twice | 0 |
 | `shuffledPerplexity` | window 1's tokens in random order | far above the text's |
 | `copiedPerplexity` | the first half of window 1, twice; the second copy scored | near 1 |
-| `decodeGap` | 128 greedy tokens scored as they are written (decode), then again as a prompt (prefill) | small: the two paths are separate code in a port |
+| `decodeGap` | after each of six prompts, the first 128 tokens of a window: 128 greedy tokens scored as they are written (decode), then again as a prompt (prefill); the smallest of the six largest gaps (`decodeGaps`) | small: the two paths are separate code in a port, so a bug in either gaps on every prompt. An MoE model can gap on some prompts with no bug: where two experts tie for the router's last pick, the two paths pick different ones |
 
 Two results compare only when they scored the same token IDs (`tokenIdsSha256`): the same text and the same tokenizer.
 
@@ -49,13 +49,14 @@ tools/k80-perplexity/perplexity.py rank a.json b.json ...  # one model's checkpo
 
 The calibration is Qwen3.5-0.8B in FP32 on one die (`calibration/qwen3.5-0.8b.json`):
 
-| | Qwen3.5-0.8B, TP=1 | Qwen3.5-0.8B, TP=2 | Qwen3.5-35B-A3B GPTQ int4, TP=4 |
-|---|---|---|---|
-| perplexity | 40.966 | 40.966 (1.7e-7 apart) | 16.938 |
-| `repeatGap` | 0 | 0 | 0 |
-| shuffled / text | 63.7 | 63.7 | 91.6 |
-| `copiedPerplexity` | 1.154 | 1.154 | 1.189 |
-| `decodeGap` | 2.37e-5 | 2.34e-5 | 2.11e-5 |
+| | Qwen3.5-0.8B, TP=1 | Qwen3.5-0.8B, TP=2 | Qwen3.5-35B-A3B GPTQ int4, TP=4 | Qwen3.6-35B-A3B GPTQ int4, TP=4 |
+|---|---|---|---|---|
+| perplexity | 40.966 | 40.966 (1.7e-7 apart) | 16.938 | 17.559 |
+| `repeatGap` | 0 | 0 | 0 | 0 |
+| shuffled / text | 63.7 | 63.7 | 91.6 | 87.1 |
+| `copiedPerplexity` | 1.154 | 1.154 | 1.189 | 1.182 |
+| `decodeGap` | 1.25e-5 | 1.22e-5 | 1.96e-5 | 2.65e-5 |
+| `decodeGaps` over 1e-3 | none | none | 2 of 6 | 3 of 6 |
 
 ## Files
 
