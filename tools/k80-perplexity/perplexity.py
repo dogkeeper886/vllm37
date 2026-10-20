@@ -219,6 +219,10 @@ def gate(args):
         sys.exit("perplexity.py gate: criteria.yaml names no calibration yet; "
                  "record one first (README.md)")
     r, cal = load(args.result), load(cal_path)
+    for path, res in ((args.result, r), (cal_path, cal)):
+        if "decodePrompts" not in res:
+            sys.exit(f"perplexity.py gate: {path} ran the decode check on "
+                     "one prompt; measure it again")
     limit = c["decode_gap_factor"] * cal["decodeGap"]
     ratio = r["shuffledPerplexity"] / r["perplexity"]
     checks = [
