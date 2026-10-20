@@ -1,23 +1,12 @@
-# vLLM K80 Builder Image
-# Rocky Linux 8 with CUDA 11.4, GCC 10.5 and CMake 4, plus the toolchain stage
-# of tools/k80-host/setup.sh: Python 3.10.16, a virtualenv at /opt/venv,
-# cuDNN 8.7 for CUDA 11 and a PyTorch v2.4.1 sm_37 wheel. The host build runs
-# the same script, so both get the same stack.
-#
-# Build (from the repo root; the Makefile does this):
-#   docker build -t vllm37-builder -f docker/k80/builder/Dockerfile .
-#
-# Expected build time: ~120 min (GCC ~60 min, Python ~15 min, PyTorch ~45 min)
-
 FROM rockylinux/rockylinux:8
 
+# a GCC release from 9.3.0 to 11.5.0
 ARG GCC_VERSION=10.5.0
+# a CMake release from 3.26.0
 ARG CMAKE_VERSION=4.0.1
+# a whole number from 1
 ARG JOBS=4
 
-# ============================================================================
-# System packages
-# ============================================================================
 RUN dnf -y install \
         dnf-plugins-core \
         epel-release && \
@@ -47,10 +36,6 @@ RUN dnf -y install \
         zlib-devel \
     && dnf clean all
 
-# ============================================================================
-# CUDA 11.4 Toolkit (cuDNN comes from the toolchain stage below: the repo's
-# libcudnn8 resolves to a CUDA 12 build that driver 470 cannot run)
-# ============================================================================
 RUN dnf config-manager --add-repo \
         https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \
     dnf -y install \
@@ -61,9 +46,6 @@ ENV CUDA_HOME=/usr/local/cuda-11.4
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# ============================================================================
-# GCC 10 from source (Rocky 8 ships GCC 8, too old for PyTorch 2.x)
-# ============================================================================
 RUN cd /tmp && \
     wget -q https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz && \
     tar xf gcc-${GCC_VERSION}.tar.xz && \
@@ -83,12 +65,8 @@ ENV CC=/usr/local/bin/gcc
 ENV CXX=/usr/local/bin/g++
 ENV LD_LIBRARY_PATH=/usr/local/lib64:${LD_LIBRARY_PATH}
 
-# Update linker cache for new GCC
 RUN echo "/usr/local/lib64" > /etc/ld.so.conf.d/local-lib64.conf && ldconfig
 
-# ============================================================================
-# CMake 4 from source
-# ============================================================================
 RUN cd /tmp && \
     wget -q https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}.tar.gz && \
     tar xf cmake-${CMAKE_VERSION}.tar.gz && \
@@ -98,9 +76,8 @@ RUN cd /tmp && \
     make install && \
     cd /tmp && rm -rf cmake-${CMAKE_VERSION}*
 
-# ============================================================================
-# Toolchain stage: Python 3.10.16, venv, cuDNN 8.7, PyTorch v2.4.1 (sm_37)
-# ============================================================================
+# K80_PREFIX: a directory
+# K80_VENV: a directory
 ENV K80_PREFIX=/opt/k80 \
     K80_VENV=/opt/venv
 COPY tools/k80-host /usr/local/src/vllm37/tools/k80-host

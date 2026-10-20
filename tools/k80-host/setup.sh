@@ -1,25 +1,16 @@
 #!/bin/bash
-# Build vllm37 for Tesla K80 (sm_37). The host build and the docker/k80 images
-# both run this script, so they build the same stack.
-#
-# Usage: setup.sh [STAGE...]      (no stage = all four, in order)
-#   toolchain  Python 3.10.16, virtualenv, cuDNN 8.7 for CUDA 11,
-#              PyTorch v$TORCH_VERSION sm_37 wheel (about 1-2 h)
-#   deps       vLLM's Python packages: docker/k80/requirements.txt
-#   xformers   patched xformers v0.0.23 (docker/k80/xformers-build/build.sh)
-#   vllm       vllm37 from this checkout
-# A step whose output already exists is skipped.
-#
-# Needs on the host: NVIDIA driver 470, CUDA 11.4 at $CUDA_HOME, GCC 10 at
-# $CC/$CXX, CMake >= 3.26, git, wget, and the Python build headers (Rocky 8:
-# openssl-devel libffi-devel bzip2-devel xz-devel zlib-devel readline-devel
-# sqlite-devel tk-devel gdbm-devel ncurses-devel lz4-devel).
-#
+# Usage: setup.sh [STAGE...]
+#   STAGE  one or more of, in any order (default all four, in this order):
+#            toolchain  Python, a virtualenv, cuDNN and the sm_37 PyTorch
+#            deps       vLLM's Python packages
+#            xformers   the patched xformers
+#            vllm       vllm37 from this checkout
 # Env:
-#   JOBS          parallel compile jobs (default 7)
-#   K80_PREFIX    Python, cuDNN, sources, wheels (default ~/opt/k80)
-#   K80_VENV      virtualenv (default ~/.venvs/vllm37)
-#   K80_EDITABLE  1 = editable vLLM install for development, 0 = regular (default 1)
+#   JOBS          a whole number from 1 (default 7)
+#   K80_PREFIX    a directory (default ~/opt/k80)
+#   K80_VENV      a virtualenv directory (default ~/.venvs/vllm37)
+#   K80_EDITABLE  1 for an editable vLLM install, anything else for a regular
+#                 one (default 1)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,7 +49,6 @@ stage_toolchain() {
   pip install -q -c "$CONSTRAINTS" numpy packaging setuptools wheel ninja pyyaml \
     typing_extensions cffi future six requests dataclasses filelock jinja2 networkx sympy
 
-  # cuDNN 8.7 for CUDA 11: its support matrix lists SM 3.5 and later.
   if [ ! -f "$K80_PREFIX/cudnn/lib/libcudnn.so.8" ]; then
     echo "=== toolchain: cuDNN ==="
     local dl
@@ -79,9 +69,6 @@ stage_toolchain() {
       https://github.com/pytorch/pytorch.git "$SRC/pytorch-$TORCH_VERSION"
     cd "$SRC/pytorch-$TORCH_VERSION"
     pip install -q -c "$CONSTRAINTS" -r requirements.txt
-    # A tag's version.txt carries a dev label (e.g. 2.4.0a0); label the wheel
-    # with the real release. Flash and memory-efficient attention kernels need
-    # sm_50+ and are not built for sm_37.
     PYTORCH_BUILD_VERSION="$TORCH_VERSION" PYTORCH_BUILD_NUMBER=1 \
     CMAKE_PREFIX_PATH=/usr/local CMAKE_POLICY_VERSION_MINIMUM=3.5 \
     USE_CUDA=1 USE_CUDNN=1 USE_NCCL=1 USE_DISTRIBUTED=1 USE_MKLDNN=0 BUILD_TEST=0 \
@@ -90,7 +77,6 @@ stage_toolchain() {
     cp dist/torch-"$TORCH_VERSION"*.whl "$K80_PREFIX/wheels/"
     wheel=$(ls "$K80_PREFIX"/wheels/torch-"$TORCH_VERSION"-*.whl | head -1)
   fi
-  # Leave the source tree: from inside it, `import torch` finds the unbuilt package.
   cd "$K80_PREFIX"
   python -c "import torch" 2>/dev/null || pip install -q --no-deps "$wheel"
   python -c "import torch; print('torch', torch.__version__, 'cuDNN', torch.backends.cudnn.version())"
@@ -100,8 +86,6 @@ stage_deps() {
   echo "=== deps ==="
   source "$K80_VENV/bin/activate"
   pip install -q -c "$CONSTRAINTS" -r "$REPO_ROOT/docker/k80/requirements.txt"
-  # xgrammar pulls in Triton, which cannot compile for sm_37. vLLM falls back
-  # to its Triton placeholder when it is absent.
   pip uninstall -y -q triton 2>/dev/null || true
 }
 

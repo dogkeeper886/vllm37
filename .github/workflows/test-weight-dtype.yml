@@ -1,10 +1,5 @@
 name: "Test: weight dtype"
 
-# Each name in `dtype` is a job with a server of its own storing its weights that
-# way: does the server still answer, and what memory and speed does each hold?
-# Values come from the Run form, else the repository variable, else the value
-# written here as a last resort.
-
 on:
   workflow_dispatch:
     inputs:
@@ -20,9 +15,9 @@ jobs:
     outputs:
       dtype: ${{ steps.list.outputs.dtype }}
     steps:
-      # "float32,half" -> ["float32","half"], for the matrix below.
       - id: list
         env:
+          # auto, half, float16, float or float32, comma separated
           DTYPE: ${{ inputs.dtype || vars.TEST_DTYPES || 'float32,half' }}
         run: |
           DTYPE=${DTYPE// /}
@@ -30,22 +25,24 @@ jobs:
   test:
     needs: values
     strategy:
+      # whole number from 1
       max-parallel: 1
       fail-fast: false
       matrix:
         dtype: ${{ fromJSON(needs.values.outputs.dtype) }}
     name: weight-dtype (${{ matrix.dtype }})
     runs-on: [self-hosted, vllm]
-    # One job at a time on the cards, whichever workflow it belongs to.
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
-    # The server start, the calls and the judge. No build: a run never builds.
+    # whole minutes from 1
     timeout-minutes: 60
     env:
-      # The judge: a model on an ollama server.
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -57,11 +54,11 @@ jobs:
         with:
           test: weight-dtype
           dtype: ${{ matrix.dtype }}
-          # Shared settings: repository variables; empty takes the default in
-          # docker/k80/ci/service-start.sh.
+          # docker or local; empty = docker
           server: ${{ vars.TEST_SERVER }}
+          # Hugging Face model id; empty = the qwen3-0.6b profile's
           model: ${{ vars.TEST_MODEL }}
+          # whole number of tokens; empty = the qwen3-0.6b profile's
           max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
-      # Whatever happened above, cancel and timeout included: the cards go back.
       - uses: ./.github/actions/test-end
         if: always()

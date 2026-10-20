@@ -1,17 +1,10 @@
-# vLLM K80 Build System
-# Follows the dogkeeper886/ollama37 Makefile pattern.
-#
-# Usage:
-#   make build-builder    # Build the builder image (~120 min first time)
-#   make build-local      # Build the runtime image from this checkout
-#   make build-all-local  # Build builder + runtime
-#   make run              # Start the vllm37 container, wait until it serves
-#   make clean            # Remove images
-
 -include .env
 
+# an image name, with or without a :tag
 BUILDER_IMAGE  ?= vllm37-builder
+# an image name, with or without a :tag
 RUNTIME_LOCAL  ?= vllm37-local
+# a whole number from 1
 JOBS           ?= 4
 REPO_ROOT      := $(shell git rev-parse --show-toplevel 2>/dev/null || echo ../..)
 
@@ -63,9 +56,9 @@ clean: ## Remove builder and runtime images
 	-docker rmi $(RUNTIME_LOCAL) $(BUILDER_IMAGE) 2>/dev/null
 	@echo "Cleaned up images."
 
-# CUTLASS revision pinned by CMakeLists.txt:302 — keep these in sync if upstream
-# vLLM bumps the FetchContent revision.
+# a git tag of CUTLASS_PIN_REPO
 CUTLASS_PIN_TAG ?= v4.0.0
+# a git URL
 CUTLASS_PIN_REPO ?= https://github.com/NVIDIA/cutlass.git
 
 verify-cutlass-patches: ## Verify cutlass-patches/*.patch apply cleanly to the pinned CUTLASS
@@ -86,10 +79,9 @@ verify-cutlass-patches: ## Verify cutlass-patches/*.patch apply cleanly to the p
 	done; \
 	echo "all patches apply cleanly to CUTLASS $(CUTLASS_PIN_TAG)"
 
-# XFormers pin: v0.0.23 (Dec 2023). v0.0.29+ removed the cutlass mem-eff
-# backend (commit 3d947a6), so the tag must be older; the patches are written
-# against v0.0.23. See xformers-build/build.sh.
+# a git tag of XFORMERS_PIN_REPO
 XFORMERS_PIN_TAG ?= v0.0.23
+# a git URL
 XFORMERS_PIN_REPO ?= https://github.com/facebookresearch/xformers.git
 
 verify-xformers-patches: ## Verify xformers-patches/*.patch apply cleanly to the pinned XFormers

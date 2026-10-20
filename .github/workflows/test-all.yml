@@ -1,20 +1,5 @@
 name: "Test: all"
 
-# The five tests one after another from one dispatch, to check one change. The
-# change is whatever the server serves: the image on the runner (server docker,
-# built from this run's commit when `build` is on) or the host build's working
-# tree as it is, uncommitted edits included (server local). Dispatch it on any
-# branch or on main; the summary names the build each test served.
-#
-# Each test has the inputs it varies; `dtype` and `dies` set the server of every
-# test but the one that varies them. Values come from the Run form, else the
-# repository variable, else the value written here as a last resort. The run
-# never writes a repository variable.
-#
-# Each test job takes the cards under the k80-hardware lock and gives them back
-# itself. A failed test does not stop the next one; a cancel stops the rest.
-# The test-*.yml files stay the way to run one test on its own.
-
 on:
   workflow_dispatch:
     inputs:
@@ -72,10 +57,10 @@ on:
         type: string
 
 jobs:
-  # Every value the tests take, settled once and written to the summary.
   plan:
     name: plan
     runs-on: [self-hosted, vllm]
+    # whole minutes from 1
     timeout-minutes: 5
     outputs:
       request_length: ${{ steps.plan.outputs.request_length }}
@@ -99,18 +84,31 @@ jobs:
         env:
           TESTS: ${{ inputs.tests }}
           BUILD: ${{ inputs.build }}
+          # docker or local; empty = docker
           SERVER: ${{ inputs.server || vars.TEST_SERVER }}
+          # Hugging Face model id; empty = the qwen3-0.6b profile's
           MODEL: ${{ inputs.model || vars.TEST_MODEL }}
+          # whole number of tokens; empty = the qwen3-0.6b profile's
           MAX_MODEL_LEN: ${{ inputs.max_model_len || vars.TEST_MAX_MODEL_LEN }}
+          # auto, half, float16, float or float32
           DTYPE: ${{ inputs.dtype || 'float32' }}
+          # whole number from 1, up to the host's dies
           DIES: ${{ inputs.dies || '1' }}
+          # prompt names in docker/k80/ci/tests/prompts.yaml, comma separated
           PROMPT: ${{ inputs.request_length_prompt || vars.TEST_PROMPTS || 'speech-rewrite,farewell-summary' }}
+          # whole numbers from 1, comma separated
           CALLS: ${{ inputs.concurrent_calls || vars.TEST_CALLS || '1,2' }}
+          # whole numbers from 1, comma separated
           ARRIVAL_CALLS: ${{ inputs.arrival_calls || vars.TEST_ARRIVAL_CALLS || '2' }}
+          # token counts, whole numbers from 0, comma separated
           STAGGER: ${{ inputs.arrival_stagger || vars.TEST_STAGGER || '0,20' }}
+          # whole numbers from 1 up to the host's dies, comma separated
           DIE_COUNTS: ${{ inputs.die_count || vars.TEST_DIES || '1,2' }}
+          # auto, half, float16, float or float32, comma separated
           DTYPES: ${{ inputs.weight_dtype || vars.TEST_DTYPES || 'float32,half' }}
+          # whole °C from 1, below TEST_STOP_TEMP
           START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
+          # whole °C above TEST_START_TEMP
           STOP_TEMP: ${{ vars.TEST_STOP_TEMP || '80' }}
         run: |
           set -euo pipefail
@@ -131,7 +129,6 @@ jobs:
             echo "::error::build makes the docker image, and server local does not serve it; build the host with tools/k80-host/setup.sh"
             exit 1
           fi
-          # "1, 2" -> ["1","2"], for a matrix.
           json() { local out="" v; for v in ${1//,/ }; do out+="${out:+,}\"$v\""; done; echo "[$out]"; }
           {
             for t in $ALL; do
@@ -168,8 +165,6 @@ jobs:
             echo "| Die temperature | each option runs on a server started once its dies read $START_TEMP °C or less with no model loaded, or on the running one while they still read that; $STOP_TEMP °C makes it invalid |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Only when asked: a run never builds unasked. It takes the k80-hardware lock
-  # itself, so it does not overlap a test.
   build:
     needs: plan
     if: ${{ inputs.build }}
@@ -180,15 +175,17 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.request_length == 'true' }}
     name: request-length
     runs-on: [self-hosted, vllm]
-    # One job at a time on the cards, whichever workflow it belongs to.
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
+    # whole minutes from 1
     timeout-minutes: 60
     env:
-      # The judge: a model on an ollama server.
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -205,7 +202,6 @@ jobs:
           max_model_len: ${{ needs.plan.outputs.max_model_len }}
           dtype: ${{ needs.plan.outputs.dtype }}
           dies: ${{ needs.plan.outputs.dies }}
-      # Whatever happened above, cancel and timeout included: the cards go back.
       - uses: ./.github/actions/test-end
         if: always()
 
@@ -217,10 +213,14 @@ jobs:
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
+    # whole minutes from 1
     timeout-minutes: 60
     env:
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -248,10 +248,14 @@ jobs:
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
+    # whole minutes from 1
     timeout-minutes: 60
     env:
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -276,6 +280,7 @@ jobs:
     needs: [plan, build, arrival]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.die_count == 'true' }}
     strategy:
+      # whole number from 1
       max-parallel: 1
       fail-fast: false
       matrix:
@@ -285,10 +290,14 @@ jobs:
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
+    # whole minutes from 1
     timeout-minutes: 60
     env:
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -311,6 +320,7 @@ jobs:
     needs: [plan, build, die-count]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.plan.outputs.weight_dtype == 'true' }}
     strategy:
+      # whole number from 1
       max-parallel: 1
       fail-fast: false
       matrix:
@@ -320,10 +330,14 @@ jobs:
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
+    # whole minutes from 1
     timeout-minutes: 60
     env:
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -342,17 +356,16 @@ jobs:
       - uses: ./.github/actions/test-end
         if: always()
 
-  # One table over every test's report. No cards: it only reads the reports.
   summary:
     needs: [plan, build, request-length, concurrent-calls, arrival, die-count, weight-dtype]
     if: ${{ always() && needs.plan.result == 'success' }}
     name: summary
     runs-on: [self-hosted, vllm]
+    # whole minutes from 1
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: ./.github/actions/setup-tests
-      # No report at all (every test skipped) is not an error here.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:

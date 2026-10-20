@@ -33,7 +33,7 @@ import time
 
 try:
     from vllm.third_party import pynvml as nv
-except ImportError:  # outside the vLLM venv
+except ImportError:
     import pynvml as nv
 
 REASONS = [(0x1, "idle"), (0x2, "app-clock"), (0x4, "sw-power-cap"),
@@ -46,15 +46,13 @@ def reason_names(bits):
 
 
 class Sampler:
-    """Samples the given dies (NVML indexes, PCI bus order) in a thread."""
-
     def __init__(self, dies=None, interval=0.05):
         nv.nvmlInit()
         n = nv.nvmlDeviceGetCount()
         self.dies = list(range(n)) if dies is None else list(dies)
         self.handles = {d: nv.nvmlDeviceGetHandleByIndex(d) for d in self.dies}
         self.interval = interval
-        self.rows = []  # (t, die, clock MHz, util %, power W, temp C, reasons)
+        self.rows = []
         self._stop = threading.Event()
         self._thread = None
         self._log_from = {}
@@ -67,7 +65,6 @@ class Sampler:
             return 0
 
     def clock_changes(self, d):
-        """Clock changes the driver logged since start(): [(us, MHz)]."""
         try:
             _, samples = nv.nvmlDeviceGetSamples(self.handles[d],
                                                  nv.NVML_PROCESSOR_CLK_SAMPLES,

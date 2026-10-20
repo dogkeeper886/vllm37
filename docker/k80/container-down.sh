@@ -1,9 +1,7 @@
 #!/bin/bash
-# Stop and remove the vllm37 container.
-#
-# Usage: container-down.sh
 # Env:
-#   COMPOSE_FILE  compose files to use, as for container-up.sh
+#   COMPOSE_FILE  compose files in docker/k80, colon-separated, the same as
+#                 container-up.sh's (default docker-compose.yml)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 docker compose down -v

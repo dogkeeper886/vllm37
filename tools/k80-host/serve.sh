@@ -1,14 +1,26 @@
 #!/bin/bash
-# Serve a model from the host build with the same settings as docker/k80/docker-compose.yml.
-# Extra arguments go to the vLLM server, e.g. serve.sh --model-impl transformers
-# Env: PROFILE, a model profile in docker/k80/models/ (a name or a path): its
-#      flags go first, and MODEL, DTYPE, TP_SIZE and MAX_MODEL_LEN override its
-#      own; CUDA_VISIBLE_DEVICES must name tensor x pipeline parallel dies.
-#      MODEL, TP_SIZE (default 1), MAX_MODEL_LEN,
-#      GPU_MEM_UTIL, DTYPE, PORT, CUDA_VISIBLE_DEVICES,
-#      VLLM_ATTENTION_BACKEND (XFORMERS default, or TORCH_SDPA),
-#      VLLM_K80_CUDA_GRAPHS (1 = CUDA graphs instead of --enforce-eager, #93;
-#      leave room for the graphs with a lower GPU_MEM_UTIL, e.g. 0.78).
+# Usage: serve.sh [FLAG...]
+#   FLAG  flags of vllm.entrypoints.openai.api_server, passed last
+# Env:
+#   PROFILE                 a profile name in docker/k80/models/ or a path
+#                           (default none)
+#   MODEL                   a Hugging Face model id or a model directory
+#                           (default the profile's, else
+#                           TinyLlama/TinyLlama-1.1B-Chat-v1.0)
+#   DTYPE                   float32, half or auto (default the profile's, else
+#                           float32)
+#   TP_SIZE                 a die count that divides the model's attention
+#                           heads (default the profile's, else 1)
+#   MAX_MODEL_LEN           tokens, up to the model's own limit (default the
+#                           profile's, else 2048)
+#   CUDA_VISIBLE_DEVICES    comma-separated die indexes, TP_SIZE times the
+#                           profile's pipeline parallel size of them
+#                           (default all)
+#   GPU_MEM_UTIL            a fraction above 0, at most 1 (default 0.85)
+#   PORT                    a TCP port (default 8000)
+#   VLLM_ATTENTION_BACKEND  XFORMERS or TORCH_SDPA (default XFORMERS)
+#   VLLM_K80_CUDA_GRAPHS    1 for CUDA graphs, anything else for
+#                           --enforce-eager (default 0)
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 export VLLM_USE_V1=0 VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} TORCHDYNAMO_DISABLE=1 \

@@ -1,14 +1,3 @@
-/**
- * The only reader of prompts.yaml.
- * From ollama37's cicd/tests/lib/prompts.ts; only the env name differs.
- *
- * Every prompt a test sends and every question the judge asks lives in that one
- * file. This loads it once, rejects a broken file before any model is called, and
- * hands out a prompt by name -- so a test never holds prompt text, and each prompt
- * brings its own judge question.
- *
- * VLLM37_PROMPTS points at another file for an experiment.
- */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,22 +5,14 @@ import { parse } from 'yaml';
 
 export interface Prompt {
   name: string;
-  /** The text sent to the model. */
   text: string;
-  /** Request options, under Ollama's names; lib/vllm.ts maps them. */
   options: Record<string, unknown>;
-  /** The judge question with `{reply}` (and `{result}` for grounded) still in it. */
   judge: string;
   judgeName: string;
-  /** The judge's answer that passes the reply. */
   judgePass: 'yes' | 'no';
-  /** A string the reply must contain, when the prompt plants one. */
   expect?: string;
-  /** Strings the reply must not contain (case-insensitive): refusals. */
   reject: string[];
-  /** An image or audio clip to send with the prompt. */
   media?: Media;
-  /** Tools offered to the model; each answers its fixed result. */
   tools: LocalTool[];
 }
 
@@ -46,6 +27,7 @@ interface Entry {
 interface Judge { pass: 'yes' | 'no'; question: string }
 interface File { prompts: Record<string, Entry>; judges: Record<string, Judge>; warmup: string }
 
+// VLLM37_PROMPTS: a file laid out as prompts.yaml (default ci/tests/prompts.yaml)
 const FILE = process.env.VLLM37_PROMPTS
   ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', 'prompts.yaml');
 
@@ -74,17 +56,13 @@ function load(): File {
 
 const config = load();
 
-/** The judge's throwaway first question. */
 export const warmupQuestion = (): string => config.warmup;
 
-/** All prompt names, for a script's --help and for validating its choice. */
 export const promptNames = (): string[] => Object.keys(config.prompts);
 
-/** Prompts whose `models` list names `model`. */
 export const promptsFor = (model: string): string[] =>
   Object.entries(config.prompts).filter(([, e]) => e.models?.includes(model)).map(([n]) => n);
 
-/** The prompt called `name`. */
 export function prompt(name: string): Prompt {
   const e = config.prompts[name];
   if (!e) throw new Error(`no prompt "${name}" in ${FILE}; have: ${promptNames().join(', ')}`);

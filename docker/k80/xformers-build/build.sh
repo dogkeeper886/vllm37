@@ -1,38 +1,16 @@
 #!/usr/bin/env bash
-#
-# Build XFormers v0.0.23 from source against patched CUTLASS, targeting sm_37
-# (Tesla K80). tools/k80-host/setup.sh runs this as its `xformers` stage, on
-# the host and in the runtime image; it needs CUDA 11.4, GCC 10 and the sm_37
-# PyTorch from the `toolchain` stage. The script:
-#
-#   1. Clones XFormers v0.0.23 with submodules (recursive — pulls bundled
-#      CUTLASS at e0aaa3c3 / Sep 2023 / pre-v3.5).
-#   2. Applies XFormers patches (xformers-patches/*.patch).
-#   3. Applies CUTLASS patches to the bundled submodule
-#      (cutlass-patches/*.patch).
-#   4. Builds XFormers with TORCH_CUDA_ARCH_LIST="3.7" so NVCC emits sm_37
-#      kernels.
-#   5. Verifies the install (xformers._C imports; FwOp.CUDA_MINIMUM_COMPUTE_
-#      CAPABILITY reflects our patch).
-#
-# Patches:
-#   xformers-patches/sm37-generate-kernels.patch    adds sm_37 to the kernel
-#       generator, so cutlassF kernels are instantiated for the K80.
-#   xformers-patches/sm37-cc-gate.patch             lowers the dispatcher's
-#       minimum compute capability from (5, 0) to (3, 7). Ops that set their
-#       own minimum (Flash, Triton) keep it.
-#   xformers-patches/sm37-from-seqlens-device.patch backports the device=
-#       argument of BlockDiagonalMask.from_seqlens, which vLLM's XFormers
-#       backend passes.
-#   cutlass-patches/sm37-trait.patch                adds the arch::Sm37 trait
-#       to CUTLASS.
-#
-# Pin: XFormers v0.0.29 removed the cutlass kernels from its tree, so the tag
-# must be older than that. The patches are written against v0.0.23; a newer
-# tag (up to v0.0.28.post3) means porting them.
-#
-# Idempotent: re-applies patches via `git apply -3` so a previously-patched
-# tree doesn't trip up subsequent runs.
+# Env:
+#   PATCH_DIR          a directory of xformers .patch files (default
+#                      ../xformers-patches beside this script)
+#   CUTLASS_PATCH_DIR  a directory of CUTLASS .patch files (default
+#                      ../cutlass-patches beside this script)
+#   WORK_DIR           a directory (default /tmp/xformers-sm37-build)
+#   XFORMERS_TAG       a git tag of XFORMERS_REPO that the patches apply to
+#                      (default v0.0.23)
+#   XFORMERS_REPO      a git URL
+#                      (default https://github.com/facebookresearch/xformers.git)
+#   TARGET_ARCH_LIST   a CUDA arch list such as 3.7 (default 3.7)
+#   MAX_JOBS           a whole number from 1 (default 4)
 
 set -euo pipefail
 
@@ -57,9 +35,6 @@ which nvcc && nvcc --version | head -4 || echo "(nvcc not on PATH)"
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)" 2>&1 || true
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 1: prepare XFormers source
-# -----------------------------------------------------------------------------
 echo "=== Step 1: clone XFormers ${XFORMERS_TAG} (with submodules) ==="
 if [ ! -d "${PATCH_DIR}" ]; then
     echo "ERROR: PATCH_DIR does not exist: ${PATCH_DIR}"
@@ -90,9 +65,6 @@ echo "Bundled CUTLASS submodule:"
 git -C "${WORK_DIR}/xformers/third_party/cutlass" log -1 --pretty=format:"  %H %ad %s" --date=short
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 2: apply XFormers patches (sm_37)
-# -----------------------------------------------------------------------------
 echo "=== Step 2a: apply XFormers patches ==="
 shopt -s nullglob
 xfmr_patches=( "${PATCH_DIR}"/*.patch )
@@ -118,27 +90,9 @@ grep -n "CUDA_MINIMUM_COMPUTE_CAPABILITY: Tuple" "${WORK_DIR}/xformers/xformers/
     || { echo "ERROR: CC gate line not found"; exit 1; }
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 2c: regenerate autogen kernels (with sm_37)
-# -----------------------------------------------------------------------------
-# CRITICAL: the autogen .cu files are committed to the XFormers repo as
-# pre-generated source. setup.py does NOT invoke generate_kernels.py at build
-# time — running it is a manual developer step that produces the committed
-# files. So our sm37-generate-kernels.patch updates the SCRIPT but not the
-# generated output. We need to run the script ourselves to regenerate the
-# autogen files with sm_37 instantiations included.
-#
-# Symptom of skipping this: build succeeds, .so loads, dispatcher accepts the
-# device, but kernel launch fails with "cutlassF: no kernel found to launch!"
-# because the compiled .so contains _sm50/_sm70/_sm75/_sm80 symbols but no
-# _sm37.
 echo "=== Step 2c: regenerate autogen kernels (with sm_37) ==="
 cd "${WORK_DIR}/xformers"
 python xformers/csrc/attention/cuda/fmha/generate_kernels.py
-# `|| sm37_count=0` defends against `set -o pipefail` — if grep finds zero
-# matches it exits 1, which would otherwise propagate through the pipeline,
-# trip set -e on the assignment, and abort the script before the if-check
-# runs. We want the explicit "expected ≥50" diagnostic to fire instead.
 sm37_count=$(grep -rE "Sm37|sm37" xformers/csrc/attention/cuda/fmha/autogen/ 2>/dev/null | wc -l) || sm37_count=0
 echo "regenerated autogen files contain ${sm37_count} sm_37 references"
 if [ "${sm37_count}" -lt 50 ]; then
@@ -148,9 +102,6 @@ if [ "${sm37_count}" -lt 50 ]; then
 fi
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 2b: apply CUTLASS patches to bundled submodule
-# -----------------------------------------------------------------------------
 echo "=== Step 2b: apply CUTLASS patches to bundled submodule ==="
 shopt -s nullglob
 cutlass_patches=( "${CUTLASS_PATCH_DIR}"/*.patch )
@@ -172,34 +123,19 @@ grep -A1 "^struct Sm37" "${WORK_DIR}/xformers/third_party/cutlass/include/cutlas
     || { echo "ERROR: Sm37 struct not present after CUTLASS patching"; exit 1; }
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 3: build XFormers
-# -----------------------------------------------------------------------------
 echo "=== Step 3: build XFormers (TORCH_CUDA_ARCH_LIST=${TARGET_ARCH_LIST}, MAX_JOBS=${MAX_JOBS}) ==="
 cd "${WORK_DIR}/xformers"
 
 export TORCH_CUDA_ARCH_LIST="${TARGET_ARCH_LIST}"
 export MAX_JOBS
 export FORCE_CUDA=1
-# XFormers reads XFORMERS_DISABLE_TRITON to skip Triton ops (which we don't
-# need on K80 — Triton requires sm_70+).
 export XFORMERS_DISABLE_TRITON=1
 
-# --no-build-isolation reuses the build deps the toolchain stage installed
-# (setuptools, wheel, ninja, torch). Output is not truncated: the full nvcc
-# log is what diagnoses a failed sm_37 compile.
 pip install -v --no-build-isolation . 2>&1
 
 echo ""
 
-# -----------------------------------------------------------------------------
-# Step 4: verify
-# -----------------------------------------------------------------------------
 echo "=== Step 4: verify installation ==="
-# IMPORTANT: cd OUT of the xformers source directory before importing.
-# Python's sys.path puts the CWD first; if we stay in /tmp/.../xformers, the
-# source package (no _C.so) shadows the installed one. cd to /tmp to use
-# normal site-packages resolution.
 cd /tmp
 python <<'PYEOF'
 import sys
@@ -210,7 +146,6 @@ print(f"xformers location: {xformers.__file__}")
 import xformers._C as c
 print(f"xformers._C imported OK from: {c.__file__}")
 
-# Confirm our cc-gate patch landed
 from xformers.ops.fmha.common import AttentionOpBase
 cc = AttentionOpBase.CUDA_MINIMUM_COMPUTE_CAPABILITY
 print(f"AttentionOpBase.CUDA_MINIMUM_COMPUTE_CAPABILITY = {cc}")
@@ -218,7 +153,6 @@ if cc != (3, 7):
     print(f"WARN: expected (3, 7) base default; got {cc} — cc-gate patch may not have applied")
     sys.exit(1)
 
-# cutlassF op should still exist and inherit
 from xformers.ops.fmha.cutlass import FwOp
 fwop_cc = FwOp.CUDA_MINIMUM_COMPUTE_CAPABILITY
 print(f"cutlass.FwOp.CUDA_MINIMUM_COMPUTE_CAPABILITY = {fwop_cc}")

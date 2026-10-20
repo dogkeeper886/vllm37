@@ -1,7 +1,8 @@
-# The function-test baseline: a small, widely supported model on one die in
-# float32, so a failed function test points at the change, not the model.
-# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+# a Hugging Face repo id or a local path
 model: Qwen/Qwen3-0.6B
+# float32 or half
 dtype: float32
+# whole number from 1; with pipeline-parallel-size, at most the host's dies
 tensor-parallel-size: 1
+# tokens, up to the model's context length
 max-model-len: 12288

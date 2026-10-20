@@ -24,4 +24,5 @@ runs:
       with:
         name: ${{ env.TEST_REPORT }}
         path: docker/k80/ci/tests/results/
+        # warn, error or ignore
         if-no-files-found: warn

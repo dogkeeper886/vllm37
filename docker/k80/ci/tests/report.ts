@@ -1,19 +1,16 @@
 /**
- * The report: judge every reply test.ts recorded, write the table, set the exit code.
- *
  *   npx tsx report.ts [--input results/replies.json] [--output results/report.json]
+ *                     [--test NAME]
  *   npx tsx report.ts --ready
  *
- * Runs after docker/k80/ci/service-stop.sh has given the GPUs back, because on a
- * shared host the judge's server is the one the test borrowed the cards from.
- * --ready only checks that the judge's server answers and has the judge model,
- * so a run can stop before it takes the GPUs.
+ *   --input   test.ts's --output file                (default results/replies.json)
+ *   --output  a file path                            (default results/report.json)
+ *   --test    a name                                 (default test)
+ *   --ready   no value
  *
- * The report fails on a failed check, a "yes" to the garbage question, an
- * abstain, an option that errored, a run that recorded no reply at all, or a
- * missing replies file -- "0 failed" means every reply was checked and judged.
- * A hot die does not fail it: the replies still count, and the row's tok/s
- * carries a ⚠, not comparable (lib/dies.ts).
+ *   GITHUB_SHA           a commit                    (default empty)
+ *   GITHUB_RUN_ID        a workflow run's id         (default empty)
+ *   GITHUB_STEP_SUMMARY  a file path, or unset
  */
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -44,7 +41,6 @@ try {
   };
 }
 
-/** What service-start.sh wrote about the server, when it ran. */
 function serverLine(): string | undefined {
   try {
     const s = JSON.parse(readFileSync(resolve(dirname(resolve(input)), 'server.json'), 'utf-8'));
@@ -56,9 +52,7 @@ function serverLine(): string | undefined {
   }
 }
 
-// Judge every reply the run recorded. A reply the script check failed is not
-// sent -- it fails anyway, and a judge asked to quote a loop loops with it.
-// The judge's server may be the one the restore just started: give it a minute.
+// milliseconds, a whole number
 if (run.results.some((r) => r.checks.content.pass)) await judgeReady(60_000).catch(() => {});
 for (const r of run.results) {
   if (!r.checks.content.pass) {
@@ -80,7 +74,6 @@ const invalid = run.results.filter((r) => r.dies && !r.dies.valid).length;
 const server = serverLine();
 const cell = (s: string) => s.replace(/\s+/g, ' ').replace(/\|/g, '\\|');
 
-/** Each die while the option ran: median SM clock, °C at the start and peak, and any flag but idle. */
 function diesCell(r: Result): string {
   if (!r.dies) return '—';
   const each = r.dies.dies.map((d) => {
@@ -89,7 +82,6 @@ function diesCell(r: Result): string {
   }).join('; ');
   return r.dies.valid ? each : `⚠ not comparable: ${r.dies.reason}; ${each}`;
 }
-/** An invalid option's speed carries a ⚠: it may show the die, not the server. */
 const tps = (r: Result, v: unknown) => (r.dies && !r.dies.valid ? `${v} ⚠` : String(v));
 const rule = run.dieRule;
 

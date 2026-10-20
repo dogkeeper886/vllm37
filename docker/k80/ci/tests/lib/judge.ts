@@ -1,17 +1,8 @@
 /**
- * The agent judge. Used only by report.ts.
- * From ollama37's cicd/tests/lib/judge.ts; judgeReady() is added.
- *
- * One job: put a question from prompts.yaml to an agent and read back yes or no.
- * The agent is an ACP agent (default: the bundled Claude one) spawned over stdio,
- * with one fresh session per question so no verdict can see another. With
- * JUDGE_BASE_URL set, the agent talks to that ollama server and JUDGE_MODEL on it,
- * so the judge runs off the box under test; unset, it uses Claude on
- * CLAUDE_CODE_OAUTH_TOKEN or ~/.claude.
- *
- * Anything short of a clear yes or no -- the agent will not start, times out,
- * loops, or answers without a yes/no -- comes back as `abstain`, and the run
- * counts an abstain as a failure. A reply nobody read never passes.
+ *   JUDGE_BASE_URL  an ollama server's URL, or unset for Claude
+ *   JUDGE_MODEL     a model that server lists, or unset for the agent's own
+ *   JUDGE_AGENT     a shell command that starts an ACP agent on stdio, or unset for
+ *                   the bundled Claude agent
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
@@ -33,50 +24,33 @@ import { warmupQuestion } from './prompts.js';
 export interface Judgment {
   verdict: 'yes' | 'no' | 'abstain';
   reason: string;
-  /** The judge model's reasoning before its answer, as streamed; empty when it emits none. */
   thinking?: string;
 }
 
-/** Bounds on one question. A loop is a 3-word phrase seen LOOP_LIMIT times in LOOP_WINDOW_MS. */
+// milliseconds, whole numbers
 const TIMEOUT_MS = 300_000;
-/** The first question also starts the agent and cold-loads the judge model on its server. */
 const WARMUP_MS = 900_000;
 const LOOP_WINDOW_MS = 30_000;
 const LOOP_CHECK_MS = 5_000;
+// repeats of one 3-word phrase, a whole number
 const LOOP_LIMIT = 100;
-/** Longest reply text put in front of the judge. */
+// characters, whole numbers
 const REPLY_LIMIT = 1000;
-/**
- * Longest tool result put in front of a grounded judge. Larger than the reply cap,
- * since an answer can rest on any part of the result; bounded because the judge
- * model runs at its default 4k context and a judgement already takes ~2k tokens in
- * and up to ~1.2k out (2,500 characters is ~650 tokens). A larger result needs a
- * larger judge context.
- */
 const RESULT_LIMIT = 2500;
 
-/**
- * The judge's working directory: empty, outside any repository. Claude Code puts
- * the git status and recent commits of its working directory into the system
- * prompt; run inside this repo, the judge read our commits about the judge and
- * reasoned from them ("a test case for a judge ... mentioned in the git history").
- */
 const JUDGE_CWD = mkdtempSync(join(tmpdir(), 'vllm37-judge-'));
 
-/** The agent's environment: JUDGE_BASE_URL/JUDGE_MODEL become the Anthropic-compatible settings. */
 function agentEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
   delete env.CLAUDE_CODE_SSE_PORT;
   if (env.JUDGE_BASE_URL) {
-    // The auth token has to follow the base URL; set one without the other and the
-    // fallback to Claude breaks instead of degrading.
     env.ANTHROPIC_BASE_URL = env.JUDGE_BASE_URL;
     env.ANTHROPIC_AUTH_TOKEN = 'ollama';
     if (env.JUDGE_MODEL) {
       env.ANTHROPIC_MODEL = env.JUDGE_MODEL;
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.JUDGE_MODEL; // Claude Code's side calls; ollama has no haiku
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.JUDGE_MODEL;
     }
   }
   return env;
@@ -85,14 +59,11 @@ function agentEnv(): NodeJS.ProcessEnv {
 class Agent {
   private child?: ChildProcess;
   private conn?: ClientSideConnection;
-  /** This turn's agent messages; a new messageId starts a new one (ACP). */
   private messages: { id: string | undefined; text: string }[] = [];
-  /** This turn's reasoning, kept for the verdict. */
   thoughts = '';
   private streamed: { at: number; text: string }[] = [];
   private loopReason?: string;
 
-  /** Deadline for the next turn: WARMUP_MS until a warm-up has been answered, then TIMEOUT_MS. */
   limit = TIMEOUT_MS;
 
   private async within<T>(p: Promise<T>, label: string): Promise<T> {
@@ -131,7 +102,6 @@ class Agent {
           }
         }
       },
-      // A judge executes nothing.
       requestPermission: async (p: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
         const reject = p.options.find((o) => o.kind?.startsWith('reject'));
         return reject ? { outcome: { outcome: 'selected', optionId: reject.optionId } } : { outcome: { outcome: 'cancelled' } };
@@ -167,13 +137,8 @@ class Agent {
     this.conn.cancel({ sessionId }).catch(() => {});
   }
 
-  /** One question in a fresh session; the joined text of every message in the turn. */
   async ask(question: string): Promise<string> {
     await this.start();
-    // No tools at all: tools: [] drops Claude Code's built-in tools, and
-    // strictMcpConfig keeps the user's own MCP servers out (only mcpServers, here
-    // none, are loaded). Without it a server added to ~/.claude.json -- playwright,
-    // once -- rode along on every question and pushed it past the judge's 4k context.
     const { sessionId } = await this.within(
       this.conn!.newSession({ cwd: JUDGE_CWD, mcpServers: [], _meta: { claudeCode: { options: { tools: [], strictMcpConfig: true } } } }),
       'agent session/new',
@@ -186,7 +151,7 @@ class Agent {
     try {
       await this.within(this.conn!.prompt({ sessionId, prompt: [{ type: 'text', text: question }] }), 'agent turn');
     } catch (e) {
-      this.kill(); // a timed-out turn keeps running and would bleed into the next question
+      this.kill();
       throw this.loopReason ? new Error(this.loopReason) : e;
     } finally {
       clearInterval(guard);
@@ -197,7 +162,7 @@ class Agent {
   }
 
   kill(): void {
-    try { this.child?.kill('SIGKILL'); } catch { /* gone */ }
+    try { this.child?.kill('SIGKILL'); } catch {}
     this.child = undefined;
     this.conn = undefined;
   }
@@ -205,26 +170,12 @@ class Agent {
 
 let agent: Agent | undefined;
 
-/**
- * Put `question` (a judge template from prompts.yaml) to the judge, with
- * `{reply}` and `{result}` filled in, and read its verdict: the answer must OPEN
- * with yes or no, past markdown and quotes. The reasoning streams separately (the
- * thinking), so a sound answer leads with its verdict ("**Yes** -- this is random
- * words") and the explanation after it is full of "no" that must not count.
- * Anything else -- a hedge, another language, a verdict buried mid-answer -- is
- * an abstain, which fails the reply. (?:\1)? absorbs a doubled turn ("yesyes").
- */
 export async function judge(template: string, reply: string, result = ''): Promise<Judgment> {
-  // A cut is said out loud, so the judge does not read "absent from what it was
-  // shown" as "absent from the result".
   const cut = (s: string, limit: number) =>
     s.length > limit ? `${s.slice(0, limit)}... (cut here; the full text is ${s.length} characters)` : s;
   const question = template.replaceAll('{reply}', cut(reply, REPLY_LIMIT)).replaceAll('{result}', cut(result, RESULT_LIMIT));
   if (!agent) {
     agent = new Agent();
-    // A throwaway turn with a long deadline, so the cold start (agent spawn, judge
-    // model load) is not charged to the first real question. Failing here still
-    // leaves the question below to abstain on its own.
     agent.limit = WARMUP_MS;
     await agent.ask(warmupQuestion()).catch(() => {});
     agent.limit = TIMEOUT_MS;
@@ -242,13 +193,6 @@ export async function judge(template: string, reply: string, result = ''): Promi
   return { verdict: v, reason: `judge said ${v}`, thinking };
 }
 
-/**
- * Wait until the judge's server answers and has JUDGE_MODEL, up to `waitMs`.
- * Called before the GPU is taken, so a run that could never be judged does not
- * start, and again after the GPU is back, while the server it borrowed the card
- * from is starting. With JUDGE_BASE_URL unset the judge is Claude itself and
- * there is no server to wait for.
- */
 export async function judgeReady(waitMs = 0): Promise<void> {
   const base = process.env.JUDGE_BASE_URL;
   if (!base) return;
@@ -269,7 +213,6 @@ export async function judgeReady(waitMs = 0): Promise<void> {
   }
 }
 
-/** Stop the agent process at the end of a run. */
 export function closeJudge(): void {
   agent?.kill();
   agent = undefined;

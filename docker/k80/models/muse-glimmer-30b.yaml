@@ -1,15 +1,16 @@
-# meta-models/Muse-Glimmer-30B from its official Q4_K_M GGUF, text only
-# (#130): 52 layers, 39 with RoPE and a 2,048-token window, 13 full. TP=2 inside
-# each board and PP=2 across them, all four dies: TP stays at 2 because at
-# TP=4 a die's share of ffn_down cuts its K-quant blocks (#132). The GGUF has
-# no config or tokenizer vLLM can read, so both come from the main repository.
-# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
-# ${HF_CACHE} is the Hugging Face cache as the server sees it.
+# a .gguf path; ${HF_CACHE} is the Hugging Face cache as the server sees it
 model: ${HF_CACHE}/hub/models--meta-models--Muse-Glimmer-30B-GGUF/snapshots/70bf1b61ac09f91b24d39038091b41c582bc5d7a/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf
+# a Hugging Face repo id or a local path
 tokenizer: meta-models/Muse-Glimmer-30B
+# a Hugging Face repo id or a local path
 hf-config-path: meta-models/Muse-Glimmer-30B
+# float32 or half
 dtype: float32
+# whole number from 1; with pipeline-parallel-size, at most the host's dies
 tensor-parallel-size: 2
+# whole number from 1; with tensor-parallel-size, at most the host's dies
 pipeline-parallel-size: 2
+# tokens, up to the model's context length
 max-model-len: 8192
+# whole number from 1
 max-num-seqs: 16

@@ -1,14 +1,12 @@
-# openai/gpt-oss-20b from its official weights (#128, #129): MXFP4 experts
-# run as stored on the K80 MoE kernels, attention with sinks and a 128-token
-# window on every other layer. TP=2 on one board, GPU0 and GPU1. float32: in
-# float16 an expert's output can pass 65,504 on a later layer.
-# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+# a Hugging Face repo id or a local path
 model: openai/gpt-oss-20b
+# float32 or half
 dtype: float32
+# whole number from 1; with pipeline-parallel-size, at most the host's dies
 tensor-parallel-size: 2
+# tokens, up to the model's context length
 max-model-len: 8192
+# a fraction of each die's memory, up to 1
 gpu-memory-utilization: 0.92
-# The logits of max-num-seqs sequences over a 201,088-token vocabulary are
-# gathered and sampled on the first die: at vLLM's 256 they left 0.18 GiB
-# for its KV cache.
+# whole number from 1
 max-num-seqs: 32

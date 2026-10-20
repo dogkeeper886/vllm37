@@ -45,8 +45,6 @@ import urllib.request
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Greedy with every penalty off, so defaults the server takes from a model's
-# generation config cannot change a score.
 NEUTRAL = {
     "temperature": 0,
     "repetition_penalty": 1.0,
@@ -68,7 +66,6 @@ def call(url, path, body=None):
 
 
 def score(url, model, ids, start):
-    """log p of ids[start:], each given the tokens before it."""
     out = call(url, "/v1/completions", {
         "model": model,
         "prompt": ids,
@@ -109,8 +106,6 @@ def measure(args):
         })["tokens"]
 
     ids = tokenize(raw.decode("utf-8"), False)
-    # What the tokenizer puts before a text (a BOS token, or nothing), so each
-    # window starts the way a request does.
     prefix = tokenize("", True)
     n, w = args.windows, args.window_tokens
     if len(ids) < n * w:
@@ -260,23 +255,33 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("measure", help="score the text and run the checks")
+    # a server's base URL (default http://localhost:8000)
     m.add_argument("--url", default="http://localhost:8000")
     m.add_argument("--text", default="log-of-a-cowboy",
                    help="a name in texts/, or a path")
+    # a whole number from 1; times --window-tokens, at most the text's tokens
+    # (default 32)
     m.add_argument("--windows", type=int, default=32)
+    # a whole number from 2; with the tokenizer's prefix, at most the server's
+    # max_model_len (default 256)
     m.add_argument("--window-tokens", type=int, default=256)
     m.add_argument("--decode-prompt", type=int, default=128,
                    help="prompt tokens before the decode check's greedy tokens")
+    # a whole number from 1; with --decode-prompt, at most --window-tokens
+    # (default 128)
     m.add_argument("--decode-tokens", type=int, default=128)
+    # an integer (default 0)
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--label", default="", help="such as the profile name")
     m.add_argument("--build", default="", help="such as the server's commit")
     m.add_argument("--out", help="also write the result here")
     g = sub.add_parser("gate", help="a result against the calibration")
+    # a measure result's path
     g.add_argument("result")
     g.add_argument("--calibration",
                    help="a result to compare with, instead of criteria.yaml's")
     r = sub.add_parser("rank", help="results of one model's checkpoints")
+    # measure results' paths, one or more, of one text and tokenizer
     r.add_argument("results", nargs="+")
     args = p.parse_args()
     {"measure": measure, "gate": gate, "rank": rank}[args.cmd](args)

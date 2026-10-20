@@ -1,19 +1,16 @@
 #!/bin/bash
-# Measure a profile's perplexity on the host build (#152): start
-# tools/k80-host/serve.sh with the profile on a port of its own, wait until it
-# answers, run perplexity.py measure, stop the server.
-#
-# Usage: run.sh <profile: a name in docker/k80/models/, or a path> [measure options]
+# Usage: run.sh <profile> [OPTION...]
+#   profile  a profile name in docker/k80/models/ or a path
+#   OPTION   perplexity.py measure's --text, --windows, --window-tokens,
+#            --decode-prompt, --decode-tokens or --seed
 # Env:
-#   PORT                  the server's port (default 8011)
-#   CUDA_VISIBLE_DEVICES  the dies (default the first tensor x pipeline parallel ones)
-#   RESULTS               where the result and the server log go
-#                         (default ~/.local/state/k80-perplexity)
-#   READY_TIMEOUT         seconds to wait for the server to answer (default 3600)
-#   GPU_MEM_UTIL          the server's memory budget (default 0.75), over serve.sh's
-#                         and the profile's: a scored window's log-probabilities need
-#                         room the budget does not plan for. It sizes the KV cache
-#                         only, so no score depends on it.
+#   PORT                  a TCP port (default 8011)
+#   CUDA_VISIBLE_DEVICES  comma-separated die indexes, the profile's tensor x
+#                         pipeline parallel size of them, each with 100 MiB or
+#                         less in use (default 0 up to that size less 1)
+#   RESULTS               a directory (default ~/.local/state/k80-perplexity)
+#   READY_TIMEOUT         whole seconds (default 3600)
+#   GPU_MEM_UTIL          a fraction above 0, at most 1 (default 0.75)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -36,7 +33,6 @@ done <<< "$lines"
 name=$(basename "$file" .yaml)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((tp * pp - 1)))}
 
-# A die another process holds (CI, the vllm37 service) is refused, not shared.
 for d in ${CUDA_VISIBLE_DEVICES//,/ }; do
   used=$(nvidia-smi -i "$d" --query-gpu=memory.used --format=csv,noheader,nounits)
   if [ "$used" -gt 100 ]; then
@@ -46,7 +42,6 @@ for d in ${CUDA_VISIBLE_DEVICES//,/ }; do
 done
 
 source "$ROOT/tools/k80-host/env.sh"
-# The build the server runs: the checkout of the vllm package it imports.
 src=$(cd / && python -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))' 2>/dev/null)
 build=$(git -C "$src" rev-parse --short HEAD)
 git -C "$src" diff --quiet HEAD -- vllm || build+="+dirty"
@@ -56,7 +51,6 @@ stamp=$(date +%Y%m%d-%H%M%S)
 log=$RESULTS/$name-$stamp.server.log
 out=$RESULTS/$name-$stamp.json
 
-# The last flag wins, so this budget is the one the server takes.
 PROFILE="$file" PORT="$PORT" setsid "$ROOT/tools/k80-host/serve.sh" \
   --gpu-memory-utilization "$GPU_MEM_UTIL" > "$log" 2>&1 &
 server=$!
