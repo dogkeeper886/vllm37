@@ -41,7 +41,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.constant_size_cache import ConstantSizeCache
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -126,12 +127,10 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.in_proj_b = ColumnParallelLinear(hidden,
                                               nv,
                                               bias=False,
-                                              quant_config=quant_config,
                                               prefix=f"{prefix}.in_proj_b")
         self.in_proj_a = ColumnParallelLinear(hidden,
                                               nv,
                                               bias=False,
-                                              quant_config=quant_config,
                                               prefix=f"{prefix}.in_proj_a")
         self.out_proj = RowParallelLinear(value_dim,
                                           hidden,
@@ -373,6 +372,11 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     """Qwen3.5 / 3.6 / 3.8 text, dense or MoE. Also serves the
     ...ForConditionalGeneration checkpoints, without the vision tower."""
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
@@ -380,7 +384,8 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         config = vllm_config.model_config.hf_text_config
         self.config = config
         self.model = Qwen3_5Model(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+                                  prefix=maybe_prefix(prefix,
+                                                      "model.language_model"))
         self.tie = getattr(hf_config, "tie_word_embeddings",
                            getattr(config, "tie_word_embeddings", False))
         if self.tie:
@@ -447,6 +452,7 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 num_experts=self.config.num_experts)
         params = dict(self.named_parameters())
         loaded: set[str] = set()
+        unplaced: list[str] = []
         for name, weight in weights:
             if name.startswith("mtp.") or ".visual." in name or \
                     name.startswith("visual."):
@@ -454,29 +460,39 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             name = name.replace("model.language_model.", "model.")
             if name.startswith("lm_head.") and self.tie:
                 continue
+            if name.endswith(("k_scale", "v_scale")):
+                name = maybe_remap_kv_scale_name(name, params)
+                if name is None:
+                    continue
             if self._load_expert(name, weight, params, expert_params,
-                                 loaded):
+                                 loaded, unplaced):
                 continue
             for param_name, ckpt_name, shard in stacked:
                 if ckpt_name not in name or ".mlp.experts." in name:
                     continue
                 name = name.replace(ckpt_name, param_name)
                 if name not in params:
+                    unplaced.append(name)
                     break
                 params[name].weight_loader(params[name], weight, shard)
                 loaded.add(name)
                 break
             else:
                 if name not in params:
+                    unplaced.append(name)
                     continue
                 param = params[name]
                 getattr(param, "weight_loader",
                         default_weight_loader)(param, weight)
                 loaded.add(name)
+        if unplaced:
+            raise ValueError(
+                f"Qwen3.5: {len(unplaced)} checkpoint tensors match no "
+                f"parameter, such as {unplaced[:4]}")
         return loaded
 
-    def _load_expert(self, name, weight, params, expert_params,
-                     loaded) -> bool:
+    def _load_expert(self, name, weight, params, expert_params, loaded,
+                     unplaced) -> bool:
         if ".mlp.experts." not in name:
             return False
         for param_name, weight_name, expert_id, shard_id in expert_params:
@@ -491,5 +507,8 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                                     shard_id=shard_id,
                                     expert_id=expert_id)
                 loaded.add(name)
+            else:
+                unplaced.append(name)
             return True
+        unplaced.append(name)
         return True
