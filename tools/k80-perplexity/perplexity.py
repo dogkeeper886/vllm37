@@ -28,8 +28,9 @@ budget. The checks:
   repeat    window 1 scored twice: the largest log p difference
   shuffled  window 1's tokens in random order: its perplexity
   copied    the first half of window 1 twice: the second copy's perplexity
-  decode    greedy tokens scored as they are written (decode) and again as a
-            prompt (prefill): the largest log p difference
+  decode    after each of several prompts, greedy tokens scored as they are
+            written (decode) and again as a prompt (prefill): the largest log
+            p difference, and the smallest of those over the prompts
 """
 import argparse
 import datetime
@@ -114,6 +115,9 @@ def measure(args):
     if args.decode_prompt + args.decode_tokens > w:
         sys.exit("perplexity.py: the decode check's prompt and tokens exceed "
                  f"one window of {w}")
+    if args.decode_prompts > n:
+        sys.exit(f"perplexity.py: {args.decode_prompts} decode prompts need "
+                 f"as many windows; there are {n}")
     need = len(prefix) + w
     if max_len and need > max_len:
         sys.exit(f"perplexity.py: {need} tokens do not fit the server's "
@@ -138,19 +142,24 @@ def measure(args):
     copied_lps = score(args.url, model, prefix + half + half,
                        len(prefix) + len(half))
 
-    prompt = prefix + windows[0][:args.decode_prompt]
-    out = call(
-        args.url, "/v1/completions", {
-            "model": model,
-            "prompt": prompt,
-            "max_tokens": args.decode_tokens,
-            "logprobs": 0,
-            "ignore_eos": True,
-            "return_tokens_as_token_ids": True,
-            **NEUTRAL
-        })["choices"][0]["logprobs"]
-    written = [int(t.split(":", 1)[1]) for t in out["tokens"]]
-    prefilled = score(args.url, model, prompt + written, len(prompt))
+    decode_gaps = []
+    for i in range(args.decode_prompts):
+        prompt = prefix + windows[i][:args.decode_prompt]
+        out = call(
+            args.url, "/v1/completions", {
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": args.decode_tokens,
+                "logprobs": 0,
+                "ignore_eos": True,
+                "return_tokens_as_token_ids": True,
+                **NEUTRAL
+            })["choices"][0]["logprobs"]
+        written = [int(t.split(":", 1)[1]) for t in out["tokens"]]
+        prefilled = score(args.url, model, prompt + written, len(prompt))
+        decode_gaps.append(gap(out["token_logprobs"], prefilled))
+        log(f"decode prompt {i + 1}/{args.decode_prompts}: "
+            f"gap {decode_gaps[-1]:.3g}")
 
     now = datetime.datetime.now().astimezone()
     result = {
@@ -171,8 +180,10 @@ def measure(args):
         "repeatGap": gap(scored[0], again),
         "shuffledPerplexity": perplexity(shuffled_lps),
         "copiedPerplexity": perplexity(copied_lps),
+        "decodePrompts": args.decode_prompts,
         "decodeTokens": len(written),
-        "decodeGap": gap(out["token_logprobs"], prefilled),
+        "decodeGaps": decode_gaps,
+        "decodeGap": min(decode_gaps),
         "seed": args.seed,
     }
     text = json.dumps(result, indent=1)
@@ -211,8 +222,8 @@ def gate(args):
     limit = c["decode_gap_factor"] * cal["decodeGap"]
     ratio = r["shuffledPerplexity"] / r["perplexity"]
     checks = [
-        ("prefill/decode gap", f"{r['decodeGap']:.3g}", f"≤ {limit:.3g}",
-         r["decodeGap"] <= limit),
+        (f"prefill/decode gap, the smallest of {r['decodePrompts']} prompts",
+         f"{r['decodeGap']:.3g}", f"≤ {limit:.3g}", r["decodeGap"] <= limit),
         ("copied", f"{r['copiedPerplexity']:.4f}", f"< {c['copy_max']}",
          r["copiedPerplexity"] < c["copy_max"]),
         ("shuffled / text", f"{ratio:.1f}", f"> {c['shuffle_min_ratio']}",
@@ -265,6 +276,8 @@ def main():
     # a whole number from 2; with the tokenizer's prefix, at most the server's
     # max_model_len (default 256)
     m.add_argument("--window-tokens", type=int, default=256)
+    # a whole number from 1, at most --windows (default 6)
+    m.add_argument("--decode-prompts", type=int, default=6)
     m.add_argument("--decode-prompt", type=int, default=128,
                    help="prompt tokens before the decode check's greedy tokens")
     # a whole number from 1; with --decode-prompt, at most --window-tokens
