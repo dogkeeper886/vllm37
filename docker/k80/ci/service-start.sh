@@ -15,7 +15,8 @@
 #                   override the profile's model, dtype (weight and KV cache,
 #                   such as float32 or half), tensor parallel size and context
 #                   length; empty keeps the profile's
-#   VLLM37_RESULTS  where server.json goes (default ci/tests/results)
+#   VLLM37_RESULTS  a directory (default ci/tests/results)
+#   TEST_START_TEMP whole °C from 1, below TEST_STOP_TEMP (default 60)
 # The server takes TP_SIZE x pipeline-parallel-size dies, GPU0 first, up to what
 # the host has; vLLM says whether the model splits that many ways.
 # Output: a Server table on stdout and in $GITHUB_STEP_SUMMARY, and server.json.
@@ -76,6 +77,20 @@ BUILD=$("$HERE/runtime.sh" "$SERVER" commit)
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 "$HERE/gpu-yield.sh"
+
+START_TEMP=${TEST_START_TEMP:-60}
+COOL_FROM=$(date +%s)
+SAID=
+while :; do
+  HOTTEST=$(nvidia-smi -i "$(seq -s, 0 $(( DIES - 1 )))" --query-gpu=temperature.gpu --format=csv,noheader,nounits | sort -n | tail -1)
+  [ "$HOTTEST" -le "$START_TEMP" ] && break
+  [ -n "$SAID" ] || echo "service-start: waiting for the dies to cool to $START_TEMP °C (hottest $HOTTEST °C)"
+  SAID=1
+  sleep 5
+done
+COOLED=$(( $(date +%s) - COOL_FROM ))
+mkdir -p "$RESULTS"
+echo "{\"waitedS\": $COOLED}" > "$RESULTS/cooled.json"
 
 if [ "$SERVER" = docker ]; then
   export COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.ci.yml}
@@ -140,7 +155,6 @@ MINE=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noh
 HELD=$(printf '%s\n' "$MINE" | awk -F', *' 'NF { u[$1] = 1 } END { n = 0; for (k in u) n++; print n }')
 VRAM=$(printf '%s\n' "$MINE" | awk -F', *' 'NF { s += $3 } END { print s + 0 }')
 
-mkdir -p "$RESULTS"
 cat > "$RESULTS/server.json" <<EOF
 {"server": "$SERVER", "build": "$BUILD", "model": "$MODEL", "dtype": "$DTYPE", "dies": $DIES, "tensorParallel": $TP_SIZE, "pipelineParallel": $PP_SIZE, "profile": "$(basename "$PROFILE_FILE" .yaml)", "maxModelLen": $MAX_MODEL_LEN, "weightsGib": ${WEIGHTS:-0}, "kvTokens": $KV, "vramMib": $VRAM, "diesHolding": $HELD}
 EOF
@@ -155,6 +169,7 @@ emit ""
 emit "| | |"
 emit "|---|---|"
 emit "| Server | $SERVER, built from \`$BUILD\` |"
+emit "| Cooled | $COOLED s, until every die read $START_TEMP °C or less with no model loaded |"
 emit "| Profile | \`$(basename "$PROFILE_FILE")\` |"
 emit "| Model | \`$MODEL\` |"
 emit "| Weight dtype | \`$DTYPE\` |"

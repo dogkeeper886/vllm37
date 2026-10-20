@@ -4,7 +4,7 @@
  *
  *   npx tsx test.ts [--test NAME] [--prompt a,b] [--calls 1,2] [--stagger 0,20]
  *                   [--dies 2] [--start-temp 50] [--stop-temp 80]
- *                   [--output results/replies.json]
+ *                   [--server docker|local] [--output results/replies.json]
  *
  * Talks to a server that is already up (VLLM37_HOST, default localhost:8000);
  * docker/k80/ci/service-start.sh starts it. Inputs, each a value or a list:
@@ -17,16 +17,18 @@
  * and the dies, one value each (lib/dies.ts):
  *
  *   --dies        how many dies the server takes, GPU0 first        (default 1)
- *   --start-temp  °C every one of them must be at or below before an
- *                 option starts                                     (default 60)
+ *   --start-temp  whole °C from 1, below --stop-temp                (default 60)
  *   --stop-temp   °C at which a die makes the option invalid         (default 80)
+ *   --server      docker or local                                   (default docker)
  *
  * Sends short-answer first, the one reply with a finished answer, then the timed
- * calls: one option per combination of the listed values. Each option waits for
- * the dies to cool first, and records each die's clock, temperature and throttle
- * flags while it runs. Every reply is checked here and judged by report.ts once
- * the GPUs are back.
+ * calls: one option per combination of the listed values. Every reply is checked
+ * here and judged by report.ts once the GPUs are back.
  */
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { dieNames, watchDies } from './lib/dies.js';
 import { promptNames } from './lib/prompts.js';
 import { arg, forEachOption, runTest, type Result } from './lib/run.js';
@@ -53,6 +55,8 @@ const one = (name: string, fallback: string, min: number): number => {
 const dies = watchDies(one('dies', '1', 1), { startC: one('start-temp', '60', 1), stopC: one('stop-temp', '80', 1) });
 const { startC, stopC } = dies.rule;
 if (stopC <= startC) throw new Error(`--stop-temp (${stopC}) must be above --start-temp (${startC})`);
+const server = arg('server') ?? 'docker';
+if (server !== 'docker' && server !== 'local') throw new Error(`--server must be docker or local, got "${server}"`);
 
 // One option per combination, named by the inputs that hold more than one value.
 const options = prompts.flatMap((prompt) => calls.flatMap((n) => stagger.map((after) => ({ prompt, calls: n, stagger: after }))));
@@ -64,12 +68,41 @@ const label = (o: (typeof options)[number]): string =>
   ].filter(Boolean).join(', ') || o.prompt;
 
 const about = `Inputs: prompt=${prompts.join(',')}; calls=${calls.join(',')}; stagger=${stagger.join(',')}. ` +
-  `Each option starts with ${dieNames(dies.rule.dies)} at or below ${startC} °C; a die at ${stopC} °C or a fault flag marks its tok/s ⚠, not comparable.`;
+  `Each option runs on a server started once ${dieNames(dies.rule.dies)} read ${startC} °C or less with no model loaded, or on the running one while they still read that; ` +
+  `a die at ${stopC} °C or a fault flag marks its tok/s ⚠, not comparable.`;
 
-/** One option's calls, sent once the dies are cool, with what the dies did meanwhile. */
+const CI = fileURLToPath(new URL('..', import.meta.url));
+const RESULTS = process.env.VLLM37_RESULTS ?? join(CI, 'tests', 'results');
+const cooledS = (): number => {
+  const file = join(RESULTS, 'cooled.json');
+  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf-8')).waitedS : 0;
+};
+
+async function restart(): Promise<void> {
+  const env = { ...process.env, GITHUB_STEP_SUMMARY: '', GITHUB_ENV: '' };
+  for (const [script, args] of [['service-stop.sh', ['--server']], ['service-start.sh', [server]]] as const) {
+    const code = await new Promise<number | null>((done) => {
+      spawn(join(CI, script), [...args], { env, stdio: ['ignore', 2, 2] }).on('exit', done);
+    });
+    if (code !== 0) throw new Error(`${script} exited with ${code}`);
+  }
+}
+
+let fresh = true;
+
 async function timed(option: string, name: string, opts?: GenerateOptions): Promise<Result[]> {
-  const gate = await dies.cool();
-  process.stderr.write(`  dies after ${gate.waitedS} s: ${Object.entries(gate.startC).map(([d, c]) => `GPU${d} ${c} °C`).join(', ')}\n`);
+  await dies.ready();
+  let waitedS = 0;
+  if (fresh) {
+    waitedS = cooledS();
+  } else if (dies.hot()) {
+    process.stderr.write(`  a die reads over ${startC} °C: restarting the server so the dies cool with no model loaded\n`);
+    await restart();
+    waitedS = cooledS();
+  }
+  fresh = false;
+  const gate = { waitedS, startC: dies.now() };
+  process.stderr.write(`  cooled ${gate.waitedS} s; dies: ${Object.entries(gate.startC).map(([d, c]) => `GPU${d} ${c} °C`).join(', ')}\n`);
   const from = Date.now();
   const results = await generate(option, name, opts);
   const state = dies.state(from, Date.now(), gate);

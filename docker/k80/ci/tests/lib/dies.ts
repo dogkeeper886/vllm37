@@ -5,7 +5,6 @@
  * 88 °C, so a tok/s from a hot die measures the throttle, not the server.
  *
  *   const dies = watchDies(2, { startC: 60, stopC: 80 })   nvidia-smi -lms 100, dies 0-1
- *   const gate = await dies.cool()                         waits until every die ≤ startC
  *   ... the option's calls, from → to ...
  *   dies.state(from, to, gate)                             per die: clock, °C, W, flags
  *     └─ invalid when a die reached stopC or raised a fault flag in the window
@@ -13,11 +12,6 @@
  *
  * Reads only: nvidia-smi is asked, never set; no clock, power limit or
  * application clock changes.
- *
- * Why 60 °C to start: a die that holds a loaded server sits at 562 MHz and
- * 59-73 W with no request, and levels off at 51-55 °C (measured on #115); it
- * never reaches the 35-43 °C of a die with nothing loaded. 80 °C to stop
- * leaves 8 °C before the 88 °C slowdown, about 20 s at the fastest rise seen.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -38,7 +32,6 @@ export const dieNames = (dies: number[]): string =>
 export interface DieRule {
   /** Dies 0 to count - 1: the ones the server takes, GPU0 first. */
   dies: number[];
-  /** An option starts once every die reads this many °C or less. */
   startC: number;
   /** A die at this many °C makes the option invalid. */
   stopC: number;
@@ -54,7 +47,6 @@ export interface DieState {
   valid: boolean;
   /** Why the option is invalid; empty when valid. */
   reason: string;
-  /** Seconds the option waited for the dies to cool before it started. */
   cooledS: number;
   dies: { die: number; startC: number; medianMhz: number; minMhz: number; peakC: number; meanW: number; flags: string[] }[];
 }
@@ -83,7 +75,9 @@ const median = (xs: number[]): number => {
 
 export interface Dies {
   rule: DieRule;
-  cool(): Promise<Gate>;
+  ready(): Promise<void>;
+  hot(): boolean;
+  now(): Record<number, number>;
   state(from: number, to: number, gate: Gate): DieState;
   close(): void;
 }
@@ -107,20 +101,19 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
     latest.set(s.die, s);
   });
 
-  const now = () => Object.fromEntries(rule.dies.map((d) => [d, latest.get(d)?.c ?? NaN]));
-  const cooled = () => rule.dies.every((d) => (latest.get(d)?.c ?? Infinity) <= rule.startC);
-
   return {
     rule,
 
-    async cool(): Promise<Gate> {
-      const start = Date.now();
-      while (!cooled()) {
-        // No reading to wait on: state() says so, and the replies still count.
-        if (failure) break;
-        await new Promise((r) => setTimeout(r, 250));
-      }
-      return { waitedS: Math.round((Date.now() - start) / 1000), startC: now() };
+    async ready(): Promise<void> {
+      while (!failure && rule.dies.some((d) => !latest.has(d))) await new Promise((r) => setTimeout(r, 100));
+    },
+
+    hot(): boolean {
+      return rule.dies.some((d) => (latest.get(d)?.c ?? -Infinity) > rule.startC);
+    },
+
+    now(): Record<number, number> {
+      return Object.fromEntries(rule.dies.map((d) => [d, latest.get(d)?.c ?? NaN]));
     },
 
     state(from: number, to: number, gate: Gate): DieState {

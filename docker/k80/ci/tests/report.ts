@@ -113,7 +113,7 @@ const lines = [
   ...run.errors.map((e) => `| ${e.option} | — | — | error: ${cell(e.error).slice(0, 120)} | — | FAIL | — | — | — | — | — | — |`),
   '',
   ...(rule
-    ? [`Dies: each option started once ${dieNames(rule.dies)} read ${rule.startC} °C or less (waiting as long as that took), and shows each die's median SM clock, and its temperature at the start and at the peak, while it ran. ` +
+    ? [`Dies: each option ran on a server started once ${dieNames(rule.dies)} read ${rule.startC} °C or less with no model loaded (waiting as long as that took), or on the running one while they still read that; it shows each die's median SM clock, and its temperature at the start and at the peak, while it ran. ` +
         `A die at ${rule.stopC} °C, or a sw-power-cap, hw-slowdown, sw-thermal, hw-thermal or power-brake flag, marks the option's tok/s ⚠, not comparable with other runs. Read with nvidia-smi; nothing was set.`, '']
     : []),
   ...(server ? [server] : []),
