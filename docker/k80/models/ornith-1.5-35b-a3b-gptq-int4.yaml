@@ -1,0 +1,10 @@
+# a Hugging Face repo id or a local path
+model: SergiioB/Ornith-1.5-35B-A3B-GPTQ-Int4-sym-G128-MTP-BF16-MixedCal-v2
+# float32 or half
+dtype: float32
+# whole number from 1; with pipeline-parallel-size, at most the host's dies
+tensor-parallel-size: 4
+# tokens, up to the model's context length
+max-model-len: 8192
+# whole number from 1
+max-num-seqs: 16
