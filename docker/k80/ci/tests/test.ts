@@ -1,29 +1,19 @@
 /**
- * The test: under the condition its inputs set, does vllm37 still give a real
- * answer and not garbage?
- *
  *   npx tsx test.ts [--test NAME] [--prompt a,b] [--calls 1,2] [--stagger 0,20]
  *                   [--dies 2] [--start-temp 50] [--stop-temp 80]
  *                   [--server docker|local] [--output results/replies.json]
  *
- * Talks to a server that is already up (VLLM37_HOST, default localhost:8000);
- * docker/k80/ci/service-start.sh starts it. Inputs, each a value or a list:
- *
- *   --prompt   prompt name in prompts.yaml            (default speech-rewrite)
- *   --calls    how many calls send the prompt at once (default 1)
- *   --stagger  tokens a call has streamed before the next is sent; 0 sends the
- *              calls together                         (default 0)
- *
- * and the dies, one value each (lib/dies.ts):
- *
- *   --dies        how many dies the server takes, GPU0 first        (default 1)
+ *   --test        a name                                            (default test)
+ *   --prompt      prompt names in prompts.yaml, comma-separated     (default speech-rewrite)
+ *   --calls       whole numbers from 1, comma-separated             (default 1)
+ *   --stagger     tokens, whole numbers from 0, comma-separated     (default 0)
+ *   --dies        a whole number from 1                             (default 1)
  *   --start-temp  whole °C from 1, below --stop-temp                (default 60)
- *   --stop-temp   °C at which a die makes the option invalid         (default 80)
+ *   --stop-temp   whole °C, above --start-temp                      (default 80)
  *   --server      docker or local                                   (default docker)
+ *   --output      a file path                                       (default results/replies.json)
  *
- * Sends short-answer first, the one reply with a finished answer, then the timed
- * calls: one option per combination of the listed values. Every reply is checked
- * here and judged by report.ts once the GPUs are back.
+ *   VLLM37_RESULTS  a directory                                     (default ci/tests/results)
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -58,7 +48,6 @@ if (stopC <= startC) throw new Error(`--stop-temp (${stopC}) must be above --sta
 const server = arg('server') ?? 'docker';
 if (server !== 'docker' && server !== 'local') throw new Error(`--server must be docker or local, got "${server}"`);
 
-// One option per combination, named by the inputs that hold more than one value.
 const options = prompts.flatMap((prompt) => calls.flatMap((n) => stagger.map((after) => ({ prompt, calls: n, stagger: after }))));
 const label = (o: (typeof options)[number]): string =>
   [
@@ -114,7 +103,6 @@ async function timed(option: string, name: string, opts?: GenerateOptions): Prom
 await runTest(arg('test') ?? 'test', about, async () => {
   try {
     const { maxModelLen } = await served();
-    // A prompt that did not fit the context was cut, so the reply answers a prompt nobody sent.
     const fits = (r: Result): void => {
       if (maxModelLen) r.checks.window = { pass: r.metrics.inTokens + r.metrics.outTokens <= maxModelLen, reason: `${r.metrics.inTokens} of ${maxModelLen} tokens` };
     };

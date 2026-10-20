@@ -1,33 +1,17 @@
 #!/usr/bin/env bash
-#
-# Build the sm_37 CUTLASS SGEMM reproducers: a manual check of
-# cutlass-patches/sm37-trait.patch, the CUTLASS patch the xformers build uses.
-#   sgemm_sm37            one SGEMM through arch::Sm37, checked against a
-#                         deterministic input
-#   sgemm_sm37_vs_cublas  the same SGEMM through CUTLASS Sm37 and cuBLAS at
-#                         several sizes, compared element-wise
-#
-# Designed to run inside the K80 builder image (vllm37-builder:latest), which
-# already has CUDA 11.4 + GCC 10 + CMake 4 + Python 3.10. The script:
-#
-#   1. Clones CUTLASS at the FetchContent-pinned tag (v4.0.0 per
-#      CMakeLists.txt:302) into a scratch directory.
-#   2. Applies sm37-trait.patch.
-#   3. Compiles both .cu files with nvcc, targeting sm_37.
-#   4. Prints the resulting binary paths + sizes for the caller.
-#
-# The runtime execution is intentionally NOT done here. No workflow runs the
-# binaries now; run them by hand on the host.
-#
-# Idempotent: re-running re-applies the patch via `git apply -3` so an
-# already-patched tree doesn't trip up subsequent builds.
+# Env:
+#   PATCH_DIR     a directory of CUTLASS .patch files (default
+#                 ../cutlass-patches beside this script)
+#   WORK_DIR      a directory (default /tmp/cutlass-sm37-build)
+#   CUTLASS_TAG   a git tag of CUTLASS_REPO that the patches apply to
+#                 (default v4.0.0)
+#   CUTLASS_REPO  a git URL (default https://github.com/NVIDIA/cutlass.git)
+#   NVCC          an nvcc command or path (default nvcc)
+#   TARGET_ARCH   an nvcc -arch value such as sm_37 (default sm_37)
 
 set -euo pipefail
 
 REPRO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# All env vars below respect caller-supplied overrides (`:-` defaulting).
-# This matters when a caller mounts the patches dir elsewhere, such as
-# /patches inside a container, NOT at $REPRO_DIR/../cutlass-patches.
 PATCH_DIR="${PATCH_DIR:-${REPRO_DIR}/../cutlass-patches}"
 WORK_DIR="${WORK_DIR:-/tmp/cutlass-sm37-build}"
 CUTLASS_TAG="${CUTLASS_TAG:-v4.0.0}"
@@ -58,10 +42,6 @@ fi
 echo ""
 
 echo "=== Step 2: apply sm_37 patches ==="
-# Defensive check: PATCH_DIR must exist and contain at least one .patch.
-# Previously this loop silently iterated over an empty glob if PATCH_DIR
-# was wrong, leaving an unpatched tree to fail later with a confusing
-# "Sm37 struct not present" message. Better to fail loudly here.
 if [ ! -d "${PATCH_DIR}" ]; then
     echo "ERROR: PATCH_DIR does not exist: ${PATCH_DIR}"
     exit 1
@@ -76,8 +56,6 @@ fi
 echo "found ${#patch_files[@]} patch(es) in ${PATCH_DIR}:"
 for p in "${patch_files[@]}"; do echo "  - $(basename "$p")"; done
 
-# Use `git apply -3` for 3-way merge — handles already-applied AND minor
-# context drift if upstream CUTLASS adds nearby content.
 for patch_file in "${patch_files[@]}"; do
     patch_name="$(basename "${patch_file}")"
     echo "applying ${patch_name}..."
@@ -105,8 +83,6 @@ ls -la "${WORK_DIR}/build/sgemm_sm37"
 echo ""
 
 echo "=== Step 3b: compile sgemm_sm37_vs_cublas.cu for ${TARGET_ARCH} ==="
-# Same SGEMM via CUTLASS Sm37 and cuBLAS, compared element-wise.
-# Needs -lcublas at link time.
 "${NVCC}" \
     -std=c++17 \
     -O3 \

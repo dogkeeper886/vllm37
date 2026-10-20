@@ -1,48 +1,41 @@
-# vLLM K80 Runtime Image (local source)
-# Builds this checkout on top of the builder image with the deps, xformers and
-# vllm stages of tools/k80-host/setup.sh. Layers go from least to most often
-# changed, so a source edit rebuilds only the last stage.
-#
-# Requires: vllm37-builder image (built from docker/k80/builder/Dockerfile)
-#
-# Build (from repo root; `make build-local` does this):
-#   docker build -t vllm37-local -f docker/k80/runtime/Dockerfile.local .
-
+# an image built from docker/k80/builder/Dockerfile
 ARG BUILDER_IMAGE=vllm37-builder
 FROM ${BUILDER_IMAGE}
 
+# a whole number from 1
 ARG MAX_JOBS=4
-# Revision of the source this image was built from. docker/k80/ci/runtime.sh
-# reads this label to report which commit a test run serves.
+# a git commit hash
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 
 WORKDIR /usr/local/src/vllm37
 
-# 1. Python dependencies
 COPY requirements/common.txt requirements/common.txt
 COPY docker/k80/requirements.txt docker/k80/constraints.txt docker/k80/
 COPY tools/k80-host tools/k80-host
 RUN JOBS=${MAX_JOBS} tools/k80-host/setup.sh deps
 
-# 2. Patched xformers (CPU-only compile, ~8 min)
 COPY docker/k80/xformers-build docker/k80/xformers-build
 COPY docker/k80/xformers-patches docker/k80/xformers-patches
 COPY docker/k80/cutlass-patches docker/k80/cutlass-patches
 RUN JOBS=${MAX_JOBS} tools/k80-host/setup.sh xformers && \
     rm -rf ${K80_PREFIX}/src/xformers-build
 
-# 3. vLLM from this checkout
 COPY . .
 RUN K80_EDITABLE=0 JOBS=${MAX_JOBS} tools/k80-host/setup.sh vllm
 
-# Leave the source tree so Python imports the installed package, not ./vllm.
 WORKDIR /workspace
 
-# ============================================================================
-# Runtime configuration (docker-compose.yml adds only per-run settings)
-# ============================================================================
-# NVIDIA Container Toolkit requires these to expose GPUs inside the container
+# NVIDIA_VISIBLE_DEVICES: all, none, void, or GPU indexes or UUIDs,
+#                         comma-separated
+# NVIDIA_DRIVER_CAPABILITIES: all, or a comma-separated list of compute,
+#                             compat32, graphics, utility, video and display
+# VLLM_USE_V1: 0; 1 needs compute capability 8.0
+# VLLM_ATTENTION_BACKEND: XFORMERS or TORCH_SDPA
+# TORCHDYNAMO_DISABLE: 1 turns TorchDynamo off; any other value leaves it on
+# NCCL_P2P_LEVEL: LOC, NVL, PIX, PXB, PHB or SYS
+# VLLM_WORKER_MULTIPROC_METHOD: spawn, fork or forkserver
+# PYTHONUNBUFFERED: any non-empty value turns buffering off
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     VLLM_USE_V1=0 \
@@ -51,20 +44,20 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NCCL_P2P_LEVEL=PIX \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     PYTHONUNBUFFERED=1
-# VLLM_ATTENTION_BACKEND: the patched xformers cutlassF kernels run on sm_37.
-# TORCHDYNAMO_DISABLE: dynamo/Inductor compile through Triton, which cannot target sm_37.
-# NCCL_P2P_LEVEL=PIX: P2P only between the two dies of one card, through its PCIe
-#   switch; across the boards NCCL keeps host shared memory. Measured in #76: no Xid
-#   or hang, identical output, Qwen3-8B int4 decode +1-3 % on board A, up to +11 %
-#   on board B, +3-6 % on four dies, prefill +1-5 %.
-# VLLM_WORKER_MULTIPROC_METHOD: spawn avoids forking a process that already holds CUDA.
 
+# a TCP port, the server's --port (default 8000)
 EXPOSE 8000
 
-# stdbuf line-buffers libc stdio so NCCL output is not lost when a run hangs.
+# -o and -e: L (line), 0 (unbuffered) or a buffer size such as 4K
 ENTRYPOINT ["stdbuf", "-oL", "-eL", "python", "-m", "vllm.entrypoints.openai.api_server"]
-# TP=1 by default: TP=4 across both K80 boards can overload the shared CPU
-# power cable. Raise it per run (docker-compose.yml reads TP_SIZE).
+# --model: a Hugging Face repo id or a local path
+# --dtype: float32 or half
+# --enforce-eager: present: eager only; absent: CUDA graphs and eager
+# --tensor-parallel-size: whole number from 1, at most the host's dies, dividing
+#                         the model's attention heads
+# --max-model-len: tokens, up to the model's context length
+# --gpu-memory-utilization: a fraction of each die's memory, up to 1
+# --swap-space: GiB per die, from 0; times the dies, below 70 % of host memory
 CMD ["--model", "TinyLlama/TinyLlama-1.1B-Chat-v1.0", \
      "--dtype", "float32", \
      "--enforce-eager", \

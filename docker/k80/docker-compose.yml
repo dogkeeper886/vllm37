@@ -3,54 +3,60 @@ services:
     image: vllm37-local:latest
     container_name: vllm37
     runtime: nvidia
+    # bytes, or a size with b, k, m or g, such as 4g
     shm_size: '4g'
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
+              # all, or a whole number of GPUs from 1
               count: all
               capabilities: [gpu]
-    # The host user (#87), so files written to the shared Hugging Face cache
-    # stay the user's and the host build (tools/k80-host) can use them.
-    # container-up.sh sets HOST_UID and HOST_GID.
+    # HOST_UID and HOST_GID: a user id and a group id
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     ports:
+      # HOST:CONTAINER TCP ports; the container side is the server's --port, 8000
       - "8000:8000"
     volumes:
+      # HF_HOME: a directory
       - ${HF_HOME:-~/.cache/huggingface}:/cache/huggingface
-      # Host-visible log directory for vllm + NCCL logs. Default to /tmp so
-      # nothing lands in the repo tree by accident. Override with VLLM_LOG_DIR.
+      # VLLM_LOG_DIR: a directory
       - ${VLLM_LOG_DIR:-/tmp/vllm-logs}:/var/log/vllm
     environment:
-      # Engine settings live in runtime/Dockerfile.local; only per-run
-      # diagnostics and paths are set here.
+      # a directory in the container: the cache volume's target
       - HF_HOME=/cache/huggingface
-      # The host user has no home in the image; vLLM's and PyTorch's caches
-      # go under /tmp.
+      # a directory in the container that HOST_UID can write
       - HOME=/tmp
+      # VERSION, WARN, INFO or TRACE
       - NCCL_DEBUG=INFO
-      # NCCL writes to this file per host and per PID (%h / %p are NCCL
-      # substitutions). Keeps NCCL output separate from vLLM's stdout so a
-      # container hang does not lose NCCL evidence with the app logs.
+      # a file path in the container; %h is the host name, %p the process id
       - NCCL_DEBUG_FILE=/var/log/vllm/nccl-%h-%p.log
-      # Opt-in TP-init trace logging. Off by default; CI/dev sets =1 when
-      # diagnosing a hang.
+      # 0 or 1
       - VLLM_K80_TRACE=${VLLM_K80_TRACE:-0}
-      # XFORMERS (default) or TORCH_SDPA, e.g. for a regression comparison.
+      # XFORMERS or TORCH_SDPA
       - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
     command:
       - "--model"
+      # MODEL: a Hugging Face repo id or a local path
       - "${MODEL:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}"
       - "--dtype"
+      # DTYPE: float32 or half
       - "${DTYPE:-float32}"
+      # present: eager only; absent: CUDA graphs and eager
       - "--enforce-eager"
       - "--tensor-parallel-size"
+      # TP_SIZE: whole number from 1, at most the host's dies, dividing the
+      # model's attention heads
       - "${TP_SIZE:-1}"
       - "--max-model-len"
+      # MAX_MODEL_LEN: tokens, up to the model's context length
       - "${MAX_MODEL_LEN:-2048}"
       - "--gpu-memory-utilization"
+      # GPU_MEM_UTIL: a fraction of each die's memory, up to 1
       - "${GPU_MEM_UTIL:-0.85}"
       - "--swap-space"
+      # GiB per die, from 0; times the dies, below 70 % of host memory
       - "0"
+    # no, always, on-failure[:N] or unless-stopped
     restart: unless-stopped

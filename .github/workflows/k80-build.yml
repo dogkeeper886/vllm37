@@ -30,6 +30,7 @@ on:
         type: boolean
       builder_image:
         required: false
+        # an image name on the runner; vllm37-builder:latest is pulled when missing
         default: "vllm37-builder:latest"
         type: string
     outputs:
@@ -45,11 +46,10 @@ jobs:
   build:
     name: Build vllm37-local image
     runs-on: [self-hosted, vllm]
-    # Cap so a stuck build can't hold the k80-hardware concurrency lock
-    # indefinitely. 60 min covers the typical cached-builder path; 180 min
-    # covers the rare rebuild_builder=true full builder rebuild (~120 min).
+    # both whole minutes from 1
     timeout-minutes: ${{ inputs.rebuild_builder && 180 || 60 }}
     env:
+      # an image name on the runner; vllm37-builder:latest is pulled when missing
       BUILDER_IMAGE: ${{ inputs.builder_image || 'vllm37-builder:latest' }}
     outputs:
       result: ${{ steps.build-local.outcome }}
@@ -82,7 +82,6 @@ jobs:
         if: always()
         working-directory: docker/k80
         run: |
-          # The run summary: which image this run left on the runner.
           if ci/runtime.sh docker; then
             {
               echo "| Builder image | \`$BUILDER_IMAGE\` |"

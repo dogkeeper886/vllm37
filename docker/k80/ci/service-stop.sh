@@ -1,8 +1,4 @@
 #!/bin/bash
-# The service step, stop: save the server's log beside the report, stop the
-# server service-start.sh started, and give the K80s back. Safe to run when
-# nothing was started, so a job runs it whatever happened before.
-#
 # Usage: service-stop.sh [--server]
 #   --server  present: stop the server only and keep the K80s; absent: also give
 #             them back
@@ -31,5 +27,4 @@ rm -f "$LOCAL_LOG"
 if [ "${1:-}" = --server ]; then
   exec "$HERE/../container-down.sh"
 fi
-# Removes the container and starts the services gpu-yield.sh stopped.
 exec "$HERE/gpu-restore.sh"

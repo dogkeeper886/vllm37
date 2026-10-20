@@ -6,6 +6,7 @@ runs:
   steps:
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
       with:
+        # a Node version from 20, such as 20, 22 or 20.20.2
         node-version: "20"
     - shell: bash
       run: cd docker/k80/ci/tests && npm ci

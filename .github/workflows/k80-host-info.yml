@@ -1,15 +1,7 @@
 name: K80 Host Info
 
-# What the self-hosted K80 runner is: its GPUs, driver, CUDA toolkit and OS.
-# Read-only: no GPU compute, no docker, no tensor parallelism. Safe at any time.
-# The run summary is two tables: the host, then the toolchain.
-
 on:
   workflow_dispatch:
-
-# No concurrency group: this workflow makes no GPU calls (pure nvidia-smi /
-# nvcc / OS-info read), so it has no business waiting on the k80-hardware
-# lock when a long compute job is running.
 
 jobs:
   info:

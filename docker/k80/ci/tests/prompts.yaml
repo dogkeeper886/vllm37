@@ -1,31 +1,18 @@
-# Every prompt a test sends, and every question the agent judge asks.
-# Nothing else in this folder may hold prompt or judge text: tests name a prompt,
-# lib/prompts.ts is the only reader, and a prompt names its own judge question,
-# so no test can pick a weaker one or none.
-#
-# The three prompts, their texts and the judge question are ollama37's
-# (cicd/tests/prompts.yaml), so a reply here and a reply there answer the same task.
-#
-# Point VLLM37_PROMPTS at another file to run an experiment without a code change.
-#
-# A prompt has:
-#   text | text_file   the prompt, inline or from a file beside this one
-#   task               appended after the text, when the text is material to work on
-#   expect             a string the reply must contain (checked by lib/check.ts)
-#   reject             strings the reply must not contain, case-insensitive
-#   options            request options under Ollama's names; lib/vllm.ts sends
-#                      temperature and seed as they are and num_predict as max_tokens
-#   judge              the name of a question under `judges` (each names the answer that passes)
-
+# prompts.<name>:
+#   text | text_file   a string, or a file path relative to this file; exactly one
+#   task               a string                                    (default none)
+#   expect             a string                                    (default none)
+#   reject             a list of strings                           (default none)
+#   options            temperature: a number from 0                (default 0)
+#                      seed: a whole number                        (default none)
+#                      num_predict: tokens, a whole number from 1  (default 100)
+#   judge              a name under judges
 prompts:
-  # Does the model load and answer in language? A wrong answer still passes.
   short-answer:
     text: "What is 2+2? Answer in one short sentence."
     options: { temperature: 0, seed: 0, num_predict: 400 }
     judge: broken
 
-  # Speed on a realistic prompt (~870 tokens in, 100 out): Lincoln's second
-  # inaugural address (1865).
   speech-rewrite:
     text_file: prompts/speech.txt
     task: >-
@@ -36,8 +23,6 @@ prompts:
     options: { temperature: 0, seed: 42, num_predict: 100 }
     judge: broken
 
-  # Speed over a long context (~8k tokens in, 100 out): Washington's Farewell
-  # Address (1796), from the Avalon Project at Yale Law School.
   farewell-summary:
     text_file: prompts/farewell.txt
     task: >-
@@ -46,13 +31,13 @@ prompts:
     options: { temperature: 0, seed: 42, num_predict: 100 }
     judge: broken
 
-# A throwaway question that starts the judge agent and loads its model before the
-# first real one, so a cold start is not charged to a reply.
+# a string, not empty
 warmup: "Reply with exactly: ok"
 
+# judges.<name>:
+#   pass               "yes" or "no"
+#   question           a string holding {reply}
 judges:
-  # Every judge question names the answer that passes, so a question can be asked
-  # either way round without the code guessing.
   broken:
     pass: "no"
     question: |

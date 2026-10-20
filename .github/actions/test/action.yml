@@ -46,9 +46,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # Each step below states its condition: the steps before it passed and the
-    # run is not cancelled. Nothing starts once a cancel has arrived.
-    # For test-end, which runs whatever happens below.
     - shell: bash
       env:
         TEST: ${{ inputs.test }}
@@ -66,7 +63,6 @@ runs:
       env:
         SERVER: ${{ inputs.server }}
       run: docker/k80/ci/runtime.sh "$SERVER"
-    # Before the GPUs are taken: a run with no judge would test nothing.
     - name: Judge ready
       if: ${{ success() && !cancelled() }}
       shell: bash

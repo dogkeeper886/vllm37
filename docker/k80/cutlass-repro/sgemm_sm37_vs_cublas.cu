@@ -1,21 +1,4 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//
-// Numerical correctness check.
-// Runs the same SGEMM through both CUTLASS (with cutlass::arch::Sm37, SIMT
-// path) and cuBLAS, compares element-wise, and reports tolerance achieved
-// across multiple matrix sizes with randomized inputs.
-//
-// Bit-exact agreement is unlikely: the two implementations sum K
-// floating-point products in different orderings (different tile schedules,
-// different warp partitioning), and FP32 addition is non-associative. We
-// expect O(K * eps * |A| * |B|) absolute error in the accumulator, which for
-// our random inputs in [-1, 1] and K up to 1024 means ~1e-4 absolute error
-// and ~1e-6 relative error.
-//
-// Acceptance: max relative error < 1e-3 across all tested sizes — comfortably
-// inside float precision noise; tighter than fp16 inference tolerance budgets.
-//
-// Build: see build.sh (needs -lcublas added to the link line vs sgemm_sm37.cu).
 
 #include <iostream>
 #include <iomanip>
@@ -48,8 +31,6 @@
     } \
 } while (0)
 
-// CUTLASS SGEMM via the arch::Sm37 tag (cutlass-patches/sm37-trait.patch).
-// Column-major to match cuBLAS conventions.
 using CutlassGemm = cutlass::gemm::device::Gemm<
     float, cutlass::layout::ColumnMajor,
     float, cutlass::layout::ColumnMajor,
@@ -60,9 +41,9 @@ using CutlassGemm = cutlass::gemm::device::Gemm<
 >;
 
 struct ErrorStats {
-    float max_abs;     // max element-wise absolute error
-    float max_rel;     // max relative error (where denom is reasonable)
-    int max_abs_idx;   // location of max abs error
+    float max_abs;
+    float max_rel;
+    int max_abs_idx;
     double mean_abs;
 };
 
@@ -76,8 +57,6 @@ ErrorStats compare(const std::vector<float>& a, const std::vector<float>& b) {
             s.max_abs = diff;
             s.max_abs_idx = static_cast<int>(i);
         }
-        // Avoid divide-by-tiny: only count rel error where the magnitude is
-        // big enough that abs error of float-precision noise wouldn't dominate.
         float denom = std::max(std::abs(a[i]), std::abs(b[i]));
         if (denom > 1e-3f) {
             float rel = diff / denom;
@@ -88,7 +67,6 @@ ErrorStats compare(const std::vector<float>& a, const std::vector<float>& b) {
     return s;
 }
 
-// Run one (M,N,K) test case and return whether it met tolerance.
 bool run_case(int M, int N, int K, std::mt19937& rng, float rel_tolerance) {
     std::cout << "\n--- M=" << M << " N=" << N << " K=" << K << " ---\n";
 
@@ -99,7 +77,7 @@ bool run_case(int M, int N, int K, std::mt19937& rng, float rel_tolerance) {
     for (auto& v : A_h) v = dist(rng);
     for (auto& v : B_h) v = dist(rng);
 
-    int const lda = M;  // column-major
+    int const lda = M;
     int const ldb = K;
     int const ldc = M;
 
@@ -116,7 +94,6 @@ bool run_case(int M, int N, int K, std::mt19937& rng, float rel_tolerance) {
     CUDA_CHECK(cudaMemset(C_cutlass_d, 0, M * N * sizeof(float)));
     CUDA_CHECK(cudaMemset(C_cublas_d, 0, M * N * sizeof(float)));
 
-    // CUTLASS path.
     CutlassGemm gemm_op;
     CutlassGemm::Arguments args(
         {M, N, K},
@@ -136,7 +113,6 @@ bool run_case(int M, int N, int K, std::mt19937& rng, float rel_tolerance) {
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // cuBLAS reference path.
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     float alpha = 1.0f, beta = 0.0f;
@@ -151,7 +127,6 @@ bool run_case(int M, int N, int K, std::mt19937& rng, float rel_tolerance) {
     CUDA_CHECK(cudaDeviceSynchronize());
     CUBLAS_CHECK(cublasDestroy(handle));
 
-    // Pull both results back, compare.
     std::vector<float> C_cutlass_h(M * N), C_cublas_h(M * N);
     CUDA_CHECK(cudaMemcpy(C_cutlass_h.data(), C_cutlass_d,
                           M * N * sizeof(float), cudaMemcpyDeviceToHost));
@@ -182,15 +157,13 @@ int main() {
     std::cout << "device       : " << prop.name << " (cc "
               << prop.major << "." << prop.minor << ")\n";
 
-    // Fixed seed → deterministic, reproducible across CI runs.
+    // a whole number from 0 to 2^32 - 1
     std::mt19937 rng(20260426u);
 
-    // Tolerance budget: O(K * eps) = O(K * 2^-23) ≈ 1.2e-4 for K=1024.
-    // Pick 1e-3 as the headline tolerance — comfortably inside what fp32
-    // SGEMM should produce regardless of reduction order, and tighter than
-    // fp16 inference tolerance budgets (1e-2 typical).
+    // a relative error above 0
     float const rel_tolerance = 1e-3f;
 
+    // {M, N, K} rows of whole numbers from 1
     int const sizes[][3] = {
         {64,   64,   64},
         {128,  128,  128},

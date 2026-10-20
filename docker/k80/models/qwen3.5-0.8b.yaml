@@ -1,10 +1,10 @@
-# Qwen/Qwen3.5-0.8B from its official BF16 weights, text only (#127): 18
-# Gated DeltaNet layers and 6 full-attention layers on one die, float32.
-# Each sequence holds about 18 MiB of recurrent state, so max-num-seqs bounds
-# that cache.
-# Keys are vLLM's own flags without the leading --; service-start.sh reads them.
+# a Hugging Face repo id or a local path
 model: Qwen/Qwen3.5-0.8B
+# float32 or half
 dtype: float32
+# whole number from 1; with pipeline-parallel-size, at most the host's dies
 tensor-parallel-size: 1
+# tokens, up to the model's context length
 max-model-len: 8192
+# whole number from 1
 max-num-seqs: 16

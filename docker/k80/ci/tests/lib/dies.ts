@@ -1,51 +1,30 @@
-/**
- * The dies under test, read while the test runs, so each timed option says what
- * clock and temperature it ran at (#115). A die sets its own clock: the driver
- * lowers it at the 149 W cap, and the hardware slows a die to about 400 MHz at
- * 88 °C, so a tok/s from a hot die measures the throttle, not the server.
- *
- *   const dies = watchDies(2, { startC: 60, stopC: 80 })   nvidia-smi -lms 100, dies 0-1
- *   ... the option's calls, from → to ...
- *   dies.state(from, to, gate)                             per die: clock, °C, W, flags
- *     └─ invalid when a die reached stopC or raised a fault flag in the window
- *   dies.close()
- *
- * Reads only: nvidia-smi is asked, never set; no clock, power limit or
- * application clock changes.
- */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
-/** Throttle reasons as nvidia-smi reports them (clocks_throttle_reasons.active). */
 const REASONS: [number, string][] = [
   [0x1, 'idle'], [0x2, 'app-clock'], [0x4, 'sw-power-cap'], [0x8, 'hw-slowdown'],
   [0x20, 'sw-thermal'], [0x40, 'hw-thermal'], [0x80, 'power-brake'],
 ];
-/** The reasons that mean the die, not the server, set the speed. */
+// any of the REASONS bits, OR-ed together
 const FAULT = 0x4 | 0x8 | 0x20 | 0x40 | 0x80;
 const names = (bits: number): string[] => REASONS.filter(([b]) => bits & b).map(([, n]) => n);
 
-/** "GPU0" or "GPU0-3". */
 export const dieNames = (dies: number[]): string =>
   dies.length > 1 ? `GPU${dies[0]}-${dies[dies.length - 1]}` : `GPU${dies[0]}`;
 
 export interface DieRule {
-  /** Dies 0 to count - 1: the ones the server takes, GPU0 first. */
   dies: number[];
   startC: number;
-  /** A die at this many °C makes the option invalid. */
   stopC: number;
 }
 
 export interface Gate {
   waitedS: number;
-  /** Each die's °C when the option started. */
   startC: Record<number, number>;
 }
 
 export interface DieState {
   valid: boolean;
-  /** Why the option is invalid; empty when valid. */
   reason: string;
   cooledS: number;
   dies: { die: number; startC: number; medianMhz: number; minMhz: number; peakC: number; meanW: number; flags: string[] }[];
@@ -60,7 +39,6 @@ interface Sample {
   bits: number;
 }
 
-/** "2026/10/16 09:46:46.440" in local time, as nvidia-smi writes it, to epoch ms. */
 function epoch(stamp: string): number {
   const m = /^(\d+)\/(\d+)\/(\d+) (\d+):(\d+):(\d+)\.(\d+)$/.exec(stamp.trim());
   if (!m) return NaN;
@@ -88,6 +66,7 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
   const latest = new Map<number, Sample>();
   let failure = '';
   const query = 'timestamp,index,temperature.gpu,clocks.sm,power.draw,clocks_throttle_reasons.active';
+  // intervalMs: milliseconds, a whole number (default 100)
   const smi: ChildProcess = spawn('nvidia-smi', [
     `--query-gpu=${query}`, '--format=csv,noheader,nounits', '-lms', String(opts.intervalMs ?? 100), '-i', rule.dies.join(','),
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -120,7 +99,6 @@ export function watchDies(count: number, opts: { startC: number; stopC: number; 
       const reasons: string[] = [];
       const dies = rule.dies.map((die) => {
         let x = samples.filter((s) => s.die === die && s.t >= from && s.t <= to);
-        // A window shorter than one pass over the dies: the last reading before it ends.
         if (!x.length) x = samples.filter((s) => s.die === die && s.t <= to).slice(-1);
         if (!x.length) {
           reasons.push(`no sample of GPU${die}${failure ? `: ${failure}` : ''}`);

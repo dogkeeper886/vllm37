@@ -1,26 +1,23 @@
 #!/bin/bash
-# The service step, start: free the K80s, start the vllm37 server a test talks
-# to, and report what it holds. service-stop.sh ends it and gives the K80s back.
-#
-# Usage: service-start.sh [docker|local]
-#   docker   the vllm37 container from vllm37-local:latest (default)
-#   local    tools/k80-host/serve.sh from the host build, as the temporary user
-#            unit vllm37-ci. ~/.config/vllm37/serve.env and the vllm37 unit are
-#            not touched.
+# Usage: service-start.sh [SERVER]
+#   SERVER          docker or local (default docker)
 # Env:
-#   PROFILE         the model profile, a name in docker/k80/models/ or a path
-#                   (default qwen3-0.6b, the function-test baseline). It holds
-#                   the model's start-up flags; ci/profile.sh reads it.
-#   MODEL, DTYPE, TP_SIZE, MAX_MODEL_LEN
-#                   override the profile's model, dtype (weight and KV cache,
-#                   such as float32 or half), tensor parallel size and context
-#                   length; empty keeps the profile's
+#   PROFILE         a name in docker/k80/models/ without .yaml, or a path
+#                   (default qwen3-0.6b)
+#   MODEL           a Hugging Face repo id or a local path (default the
+#                   profile's)
+#   DTYPE           float32 or half (default the profile's)
+#   TP_SIZE         whole number from 1; times the profile's
+#                   pipeline-parallel-size, at most the host's dies (default
+#                   the profile's)
+#   MAX_MODEL_LEN   tokens, a whole number up to the model's context length
+#                   (default the profile's)
+#   VLLM_K80_TRACE  1 or 0 (default 1 when the server takes more than one die,
+#                   else 0)
+#   COMPOSE_FILE    docker only: compose files in docker/k80, colon-separated
+#                   (default docker-compose.yml:docker-compose.ci.yml)
 #   VLLM37_RESULTS  a directory (default ci/tests/results)
 #   TEST_START_TEMP whole °C from 1, below TEST_STOP_TEMP (default 60)
-# The server takes TP_SIZE x pipeline-parallel-size dies, GPU0 first, up to what
-# the host has; vLLM says whether the model splits that many ways.
-# Output: a Server table on stdout and in $GITHUB_STEP_SUMMARY, and server.json.
-# Exit 1 when the server does not start or holds memory on other dies than asked.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -29,13 +26,14 @@ SERVER=${1:-docker}
 RESULTS=${VLLM37_RESULTS:-$HERE/tests/results}
 UNIT=vllm37-ci
 LOCAL_LOG=$XDG_RUNTIME_DIR/$UNIT.log
+# seconds, a whole number
 TIMEOUT=600
 
 case "$SERVER" in docker|local) ;; *) echo "service-start: server must be docker or local, got '$SERVER'" >&2; exit 1 ;; esac
-# The Hugging Face cache as the server sees it: the container mounts it here.
 [ "$SERVER" = docker ] && export HF_CACHE=/cache/huggingface
 PROFILE=${PROFILE:-qwen3-0.6b}
 PROFILE_LINES=$("$HERE/profile.sh" "$PROFILE")
+# P_DTYPE float32 or half; P_TP and P_PP whole numbers from 1; P_LEN tokens
 P_DTYPE=float32 P_TP=1 P_PP=1 P_LEN=12288 EXTRA=()
 while read -r kind value; do
   case "$kind" in
@@ -55,8 +53,6 @@ export MAX_MODEL_LEN=${MAX_MODEL_LEN:-$P_LEN}
 PP_SIZE=$P_PP
 
 case "$MAX_MODEL_LEN" in ''|*[!0-9]*) echo "service-start: MAX_MODEL_LEN must be a number, got '$MAX_MODEL_LEN'" >&2; exit 1 ;; esac
-# No count is written here: the host says how many dies it has, and vLLM
-# says whether the model can be split that many ways.
 case "$TP_SIZE" in ''|*[!0-9]*|0*) echo "service-start: TP_SIZE must be a whole number from 1, got '$TP_SIZE'" >&2; exit 1 ;; esac
 case "$PP_SIZE" in ''|*[!0-9]*|0*) echo "service-start: pipeline-parallel-size must be a whole number from 1, got '$PP_SIZE'" >&2; exit 1 ;; esac
 [ "$PP_SIZE" -gt 1 ] && EXTRA+=(--pipeline-parallel-size "$PP_SIZE")
@@ -66,14 +62,10 @@ if [ "$DIES" -gt "$HOST_DIES" ]; then
   echo "service-start: asked for $DIES dies, this host has $HOST_DIES" >&2
   exit 1
 fi
-# For the test step, which watches every die the server takes.
 if [ -n "${GITHUB_ENV:-}" ]; then echo "VLLM37_DIES=$DIES" >> "$GITHUB_ENV"; fi
-# More than one die: keep the tensor-parallel start-up trace.
 export VLLM_K80_TRACE=${VLLM_K80_TRACE:-$([ "$DIES" -gt 1 ] && echo 1 || echo 0)}
 
 BUILD=$("$HERE/runtime.sh" "$SERVER" commit)
-# A unit left by a killed local run would still hold the cards and port 8000,
-# whichever kind of server starts now. gpu-yield.sh does the same for a container.
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 "$HERE/gpu-yield.sh"
@@ -95,8 +87,6 @@ echo "{\"waitedS\": $COOLED}" > "$RESULTS/cooled.json"
 if [ "$SERVER" = docker ]; then
   export COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.ci.yml}
   if [ "${#EXTRA[@]}" -gt 0 ]; then
-    # docker-compose.yml's command is a fixed list, so the profile's other
-    # flags go in an override that repeats it with them appended.
     OVERRIDE=$XDG_RUNTIME_DIR/vllm37-ci-profile.json
     (cd "$HERE/.." && docker compose config --format json) \
       | python3 -I -c 'import json, sys; c = json.load(sys.stdin)["services"]["vllm"]["command"]; json.dump({"services": {"vllm": {"command": c + sys.argv[1:]}}}, sys.stdout)' "${EXTRA[@]}" \
@@ -105,7 +95,6 @@ if [ "$SERVER" = docker ]; then
   fi
   "$HERE/../container-up.sh" "$TIMEOUT"
 else
-  # The dies the server takes: the first DIES.
   DEVICES=$(seq -s, 0 $(( DIES - 1 )))
   : > "$LOCAL_LOG"
   systemd-run --user --unit="$UNIT" --collect --quiet \
@@ -134,16 +123,13 @@ else
   done
 fi
 
-# What the server holds, from its own start-up log and from nvidia-smi.
 LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT
 if [ "$SERVER" = docker ]; then docker logs vllm37 > "$LOG" 2>&1; else cp "$LOCAL_LOG" "$LOG"; fi
 WEIGHTS=$(grep -m1 -o 'model weights take [0-9.]*' "$LOG" | grep -o '[0-9.]*$' || true)
 BLOCKS=$(grep -m1 -o '# cuda blocks: [0-9]*' "$LOG" | grep -o '[0-9]*$' || true)
-# 16 tokens per KV cache block (vLLM's default --block-size).
 KV=$(( ${BLOCKS:-0} * 16 ))
 
-# Only the server's own processes: another tenant's memory is not the server's.
 if [ "$SERVER" = docker ]; then
   PIDS=$(docker top vllm37 -eo pid | tail -n +2)
 else

@@ -1,15 +1,9 @@
 #!/bin/bash
-# The runtime check: report the build a test is about to serve, and fail when
-# it is not there. It never builds. The K80 Docker Build workflow makes the
-# image; tools/k80-host/setup.sh makes the local build.
-#
-# Usage: runtime.sh [docker|local] [commit]
-#   docker   the image vllm37-local:latest (default)
-#   local    the host build in the venv, which installs a working tree in place
-#   commit   print only the commit the build was made from
-# Output: a table on stdout and in $GITHUB_STEP_SUMMARY.
+# Usage: runtime.sh [SERVER] [commit]
+#   SERVER    docker or local (default docker)
+#   commit    present: print only the build's commit; absent: print the table
 # Env:
-#   K80_VENV  the local build's venv (default ~/.venvs/vllm37)
+#   K80_VENV  a directory, a Python venv (default ~/.venvs/vllm37)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER=${1:-docker}
@@ -35,7 +29,6 @@ case "$SERVER" in
     ;;
   local)
     [ -x "$VENV/bin/python" ] || missing "No local build at \`$VENV\`. Run tools/k80-host/setup.sh."
-    # -I: CI runs this in its own checkout, whose vllm/ would shadow the build.
     PKG=$("$VENV/bin/python" -I -c "import importlib.util as u; s = u.find_spec('vllm'); print(s.submodule_search_locations[0] if s else '')")
     [ -n "$PKG" ] || missing "The venv \`$VENV\` has no vllm installed. Run tools/k80-host/setup.sh."
     TREE=$(git -C "$PKG" rev-parse --show-toplevel 2>/dev/null || true)

@@ -1,15 +1,5 @@
 name: "Test: use case"
 
-# Each profile in docker/k80/models/ is a model vllm37 supports, with its own
-# start-up flags. Each is a job with a server of its own, started from the
-# profile as written: does the model still serve and answer, and what memory
-# and speed does it hold? One pass each: short-answer, then speech-rewrite once,
-# and the judge reads both replies. The function tests (test-*.yml) ask whether
-# a change broke vllm37, on the baseline; this asks whether each model still
-# runs. A new model is a new profile, not an edit here.
-# Values come from the Run form, else the repository variable, else every
-# profile but those in EXCLUDE; a profile named there still runs.
-
 on:
   workflow_dispatch:
     inputs:
@@ -23,10 +13,10 @@ on:
         type: string
 
 jobs:
-  # The profiles, checked and turned into the matrix below.
   plan:
     name: plan
     runs-on: [self-hosted, vllm]
+    # whole minutes from 1
     timeout-minutes: 5
     outputs:
       profiles: ${{ steps.list.outputs.profiles }}
@@ -34,11 +24,14 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - id: list
         env:
+          # profile names in docker/k80/models/, comma separated; empty = every profile but EXCLUDE
           PROFILES: ${{ inputs.profiles || vars.TEST_PROFILES }}
+          # docker or local; empty = docker
           SERVER: ${{ inputs.server || vars.TEST_SERVER }}
         run: |
           set -euo pipefail
           ALL=$(cd docker/k80/models && ls *.yaml | sed 's/\.yaml$//' | tr '\n' ' ')
+          # profile names in docker/k80/models/, space separated; empty leaves none out
           EXCLUDE="qwen3-0.6b qwen3.5-0.8b"
           DEFAULT=" $ALL "
           for p in $EXCLUDE; do DEFAULT=${DEFAULT/ $p / }; done
@@ -64,22 +57,24 @@ jobs:
   use-case:
     needs: plan
     strategy:
+      # whole number from 1
       max-parallel: 1
       fail-fast: false
       matrix:
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
     name: use-case (${{ matrix.profile }})
     runs-on: [self-hosted, vllm]
-    # One job at a time on the cards, whichever workflow it belongs to.
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
-    # The server start, one pass and the judge. No build: a run never builds.
+    # whole minutes from 1
     timeout-minutes: 90
     env:
-      # The judge: a model on an ollama server.
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -91,23 +86,23 @@ jobs:
         with:
           test: use-case-${{ matrix.profile }}
           profile: ${{ matrix.profile }}
+          # docker or local; empty = docker
           server: ${{ inputs.server || vars.TEST_SERVER }}
+          # prompt names in docker/k80/ci/tests/prompts.yaml, comma separated
           prompt: speech-rewrite
-      # Whatever happened above, cancel and timeout included: the cards go back.
       - uses: ./.github/actions/test-end
         if: always()
 
-  # One table over every profile's report. No cards: it only reads the reports.
   summary:
     needs: [plan, use-case]
     if: ${{ always() && needs.plan.result == 'success' }}
     name: summary
     runs-on: [self-hosted, vllm]
+    # whole minutes from 1
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: ./.github/actions/setup-tests
-      # No report at all (every job failed before its upload) is not an error here.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:

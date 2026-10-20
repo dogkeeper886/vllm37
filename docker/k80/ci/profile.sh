@@ -1,17 +1,10 @@
 #!/bin/bash
-# Read a model profile, docker/k80/models/<name>.yaml: one flat YAML map of
-# vLLM's own flags without the leading --. The profile is the only place a
-# model's start-up flags live, so a new model is a new file, not a script edit.
-#
-# Usage: profile.sh <name or path>
-# Env:   HF_CACHE  the Hugging Face cache as the server sees it, for ${HF_CACHE}
-#                  in a value (default ${HF_HOME:-~/.cache/huggingface})
-# Output, one line each:
-#   FILE <path>                      the profile read
-#   MODEL|DTYPE|TP_SIZE|PP_SIZE|MAX_MODEL_LEN <value>
-#                                    the flags service-start.sh reads itself
-#   ARG <token>                      every other flag, in order, for vLLM
-# Exit 1 when the profile is missing, is not a flat map, or names no model.
+# Usage: profile.sh PROFILE
+#   PROFILE   a name in docker/k80/models/ without .yaml, or a path with a / or
+#             ending in .yaml or .yml
+# Env:
+#   HF_CACHE  a directory as the server sees it (default $HF_HOME)
+#   HF_HOME   a directory (default ~/.cache/huggingface)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "${1:-}" in
@@ -34,7 +27,6 @@ known = {"model": "MODEL", "dtype": "DTYPE", "tensor-parallel-size": "TP_SIZE",
          "pipeline-parallel-size": "PP_SIZE", "max-model-len": "MAX_MODEL_LEN"}
 for key, value in data.items():
     if isinstance(value, bool):
-        # As vLLM's own --config: true is the bare flag, false leaves it out.
         if value:
             print(f"ARG --{key}")
         continue

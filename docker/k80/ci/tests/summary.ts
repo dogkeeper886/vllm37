@@ -1,15 +1,10 @@
 /**
- * The summary of a test-all.yml or test-use-case.yml run: one table over the
- * reports of every test job.
- *
  *   npx tsx summary.ts [--input reports]
  *
- * Reads <input>/<artifact>/report.json and the server.json beside it, as the
- * test-end action uploads them, one row per option of each test. NEEDS, the
- * workflow's needs context, names the jobs that left no report. It judges
- * nothing and fails nothing: each test job already passed or failed on its
- * judged replies. An option whose dies ran hot or throttled has its tok/s
- * marked ⚠, not comparable with other runs.
+ *   --input  a directory of <artifact>/report.json and server.json   (default reports)
+ *
+ *   NEEDS                the workflow's needs context, as JSON        (default {})
+ *   GITHUB_STEP_SUMMARY  a file path, or unset
  */
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

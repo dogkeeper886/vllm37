@@ -1,12 +1,5 @@
 name: "Test: die count"
 
-# Each count in `dies` is a job with a server of its own on that many dies
-# (tensor parallel size): does the server still answer, and what memory and speed
-# does each hold? Any count can be asked for: the host says how many dies it has,
-# and vLLM says whether the model splits that many ways.
-# Values come from the Run form, else the repository variable, else the value
-# written here as a last resort.
-
 on:
   workflow_dispatch:
     inputs:
@@ -18,23 +11,25 @@ on:
 jobs:
   test:
     strategy:
+      # whole number from 1
       max-parallel: 1
       fail-fast: false
       matrix:
-        # "1,2,4" -> [1, 2, 4]
+        # whole numbers from 1 up to the host's dies, comma separated
         dies: ${{ fromJSON(format('[{0}]', inputs.dies || vars.TEST_DIES || '1,2')) }}
     name: die-count (${{ matrix.dies }} die)
     runs-on: [self-hosted, vllm]
-    # One job at a time on the cards, whichever workflow it belongs to.
     concurrency:
       group: k80-hardware
       cancel-in-progress: false
-    # The server start, the calls and the judge. No build: a run never builds.
+    # whole minutes from 1
     timeout-minutes: 60
     env:
-      # The judge: a model on an ollama server.
+      # URL of an ollama server
       JUDGE_BASE_URL: ${{ vars.JUDGE_BASE_URL || 'http://localhost:11434' }}
+      # a model name on the JUDGE_BASE_URL server, as ollama lists it
       JUDGE_MODEL: ${{ vars.JUDGE_MODEL || 'ornith-1.5:9b' }}
+      # a host directory path
       VLLM_LOG_DIR: /tmp/k80-ci-logs
       # whole °C from 1, below TEST_STOP_TEMP
       TEST_START_TEMP: ${{ vars.TEST_START_TEMP || '60' }}
@@ -46,11 +41,11 @@ jobs:
         with:
           test: die-count
           dies: ${{ matrix.dies }}
-          # Shared settings: repository variables; empty takes the default in
-          # docker/k80/ci/service-start.sh.
+          # docker or local; empty = docker
           server: ${{ vars.TEST_SERVER }}
+          # Hugging Face model id; empty = the qwen3-0.6b profile's
           model: ${{ vars.TEST_MODEL }}
+          # whole number of tokens; empty = the qwen3-0.6b profile's
           max_model_len: ${{ vars.TEST_MAX_MODEL_LEN }}
-      # Whatever happened above, cancel and timeout included: the cards go back.
       - uses: ./.github/actions/test-end
         if: always()
